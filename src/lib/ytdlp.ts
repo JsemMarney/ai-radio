@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, constants, mkdir, readdir, rename } from "node:fs/promises";
+import { access, constants, mkdir, readdir, rename, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +8,8 @@ import {
   findBySpotifyId,
   getDownloadsDir,
   getTrackDir,
+  readTrackInfo,
+  resolveAudioPath,
   toPublicTrack,
   writeTrackInfo,
   type LibraryTrack,
@@ -54,6 +56,23 @@ async function resolveYtDlp(): Promise<string> {
 async function resolveFfmpeg(): Promise<string | null> {
   const candidates = [
     process.env.FFMPEG_PATH,
+    "ffmpeg",
+    path.join(process.env.USERPROFILE ?? "", "scoop", "shims", "ffmpeg.exe"),
+    path.join(
+      process.env.LOCALAPPDATA ?? "",
+      "Microsoft",
+      "WinGet",
+      "Links",
+      "ffmpeg.exe",
+    ),
+    "C:\\ffmpeg\\bin\\ffmpeg.exe",
+    path.join(
+      process.env.LOCALAPPDATA ?? "",
+      "Programs",
+      "ffmpeg",
+      "bin",
+      "ffmpeg.exe",
+    ),
     path.join(
       process.env.HOME ?? "",
       "Library/Python/3.9/lib/python/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
@@ -64,7 +83,7 @@ async function resolveFfmpeg(): Promise<string | null> {
 
   for (const candidate of candidates) {
     try {
-      await access(candidate, constants.X_OK);
+      await execFileAsync(candidate, ["-version"], { timeout: 8000 });
       return candidate;
     } catch {
       // try next
@@ -73,16 +92,19 @@ async function resolveFfmpeg(): Promise<string | null> {
   return null;
 }
 
+function pathSeparator(): string {
+  return process.platform === "win32" ? ";" : ":";
+}
+
 function ytdlpEnv(ytdlp: string, ffmpeg: string | null) {
+  const extra = [
+    path.dirname(ytdlp),
+    ffmpeg ? path.dirname(ffmpeg) : null,
+  ].filter(Boolean) as string[];
+
   return {
     ...process.env,
-    PATH: [
-      path.dirname(ytdlp),
-      ffmpeg ? path.dirname(ffmpeg) : null,
-      process.env.PATH ?? "",
-    ]
-      .filter(Boolean)
-      .join(":"),
+    PATH: [...extra, process.env.PATH ?? ""].filter(Boolean).join(pathSeparator()),
   };
 }
 
@@ -181,7 +203,7 @@ function buildDownloadArgs(
     "--print-json",
     "--no-simulate",
     "-f",
-    "bestaudio/best",
+    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
     "-o",
     outputTemplate,
     "--no-mtime",
@@ -190,7 +212,15 @@ function buildDownloadArgs(
   ];
 
   if (ffmpeg) {
-    args.push("--ffmpeg-location", ffmpeg, "-x", "--audio-format", "mp3");
+    args.push(
+      "--ffmpeg-location",
+      ffmpeg,
+      "-x",
+      "--audio-format",
+      "mp3",
+      "--audio-quality",
+      "0",
+    );
   }
 
   args.push(source);
@@ -225,14 +255,35 @@ async function downloadFromSource(
 async function normalizeToTrackFile(
   filepath: string,
   trackDir: string,
+  ffmpeg: string | null,
 ): Promise<string> {
-  const ext = path.extname(filepath).toLowerCase() || ".mp3";
-  const dest = path.join(trackDir, `track${ext}`);
-  if (path.resolve(filepath) === path.resolve(dest)) return dest;
-  if (existsSync(dest) && path.resolve(filepath) !== path.resolve(dest)) {
-    await rename(dest, `${dest}.old`);
+  let source = filepath;
+  const ext = path.extname(source).toLowerCase();
+
+  if (ext !== ".mp3" && ffmpeg) {
+    const mp3Path = path.join(trackDir, "track.mp3");
+    await execFileAsync(
+      ffmpeg,
+      ["-y", "-i", source, "-vn", "-acodec", "libmp3lame", "-q:a", "2", mp3Path],
+      { timeout: 300_000 },
+    );
+    if (path.resolve(source) !== path.resolve(mp3Path)) {
+      try {
+        await unlink(source);
+      } catch {
+        // ignore
+      }
+    }
+    source = mp3Path;
   }
-  await rename(filepath, dest);
+
+  const finalExt = path.extname(source).toLowerCase() || ".mp3";
+  const dest = path.join(trackDir, `track${finalExt}`);
+  if (path.resolve(source) === path.resolve(dest)) return dest;
+  if (existsSync(dest) && path.resolve(source) !== path.resolve(dest)) {
+    await unlink(dest).catch(() => {});
+  }
+  await rename(source, dest);
   return dest;
 }
 
@@ -252,6 +303,11 @@ export async function importSpotifyTrack(
   try {
     const ytdlp = await resolveYtDlp();
     const ffmpeg = await resolveFfmpeg();
+    if (!ffmpeg) {
+      throw new Error(
+        "ffmpeg nenalezen — bez něj se stahuje video (mp4). Nainstaluj ffmpeg (scoop install ffmpeg) nebo nastav FFMPEG_PATH.",
+      );
+    }
     const query = searchQueryForTrack(meta);
     const outputTemplate = path.join(trackDir, "track.%(ext)s");
 
@@ -282,7 +338,7 @@ export async function importSpotifyTrack(
       throw new Error("Stažení proběhlo, ale výsledný audio soubor se nenašel.");
     }
 
-    const finalPath = await normalizeToTrackFile(filepath, trackDir);
+    const finalPath = await normalizeToTrackFile(filepath, trackDir, ffmpeg);
     const now = new Date().toISOString();
 
     const ready: LibraryTrack = {
@@ -314,6 +370,47 @@ export async function importSpotifyTrack(
 
 export function publicTrackPayload(track: LibraryTrack) {
   return toPublicTrack(track);
+}
+
+/** Convert track to mp3 if needed (e.g. legacy mp4 downloads). */
+export async function ensureTrackMp3(uuid: string): Promise<string | null> {
+  const filepath = await resolveAudioPath(uuid);
+  if (!filepath) return null;
+
+  const ext = path.extname(filepath).toLowerCase();
+  if (ext === ".mp3") return filepath;
+
+  const ffmpeg = await resolveFfmpeg();
+  if (!ffmpeg) return filepath;
+
+  const trackDir = getTrackDir(uuid);
+  const mp3Path = path.join(trackDir, "track.mp3");
+  if (existsSync(mp3Path)) return mp3Path;
+
+  await execFileAsync(
+    ffmpeg,
+    ["-y", "-i", filepath, "-vn", "-acodec", "libmp3lame", "-q:a", "2", mp3Path],
+    { timeout: 300_000 },
+  );
+
+  const info = await readTrackInfo(uuid);
+  if (info) {
+    await writeTrackInfo({
+      ...info,
+      audioFile: "track.mp3",
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  if (path.resolve(filepath) !== path.resolve(mp3Path)) {
+    try {
+      await unlink(filepath);
+    } catch {
+      // ignore
+    }
+  }
+
+  return mp3Path;
 }
 
 // re-export for audio route compatibility

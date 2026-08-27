@@ -37,11 +37,23 @@ Otevři [http://127.0.0.1:3000](http://127.0.0.1:3000).
 2. Metadata ze Spotify API, audio přes yt-dlp (YouTube search).
 3. Každá píseň = `downloads/{uuid}/info.json` + `track.mp3`.
 4. Stejné Spotify ID se znovu nestahuje.
-5. **Radio** hraje náhodně ze všech ready skladeb (shuffle bag bez opakování, dokud neprojde celá fronta).
+5. **Radio** streamuje náhodně ze všech ready skladeb (shuffle bag bez opakování, dokud neprojde celá fronta). Po dohrání skladby server sám pustí další.
+
+## Stream
+
+Živý radio stream (jako Zeno.fm) — otevři v prohlížeči, VLC nebo jiném přehrávači:
+
+```
+http://127.0.0.1:3000/api/radio/stream
+```
 
 ## API
 
 - `POST /api/import` — `{ url }` → track nebo playlist job
 - `GET /api/jobs/:id` — progress playlistu
 - `GET /api/library` — seznam stažených
-- `GET /api/audio/:uuid` — stream mp3
+- `GET /api/audio/:uuid` — jednotlivý mp3 soubor
+- `GET /api/radio/stream` — živý radio stream (audio/mpeg)
+- `GET /api/radio/status` — právě hraje
+- `POST /api/radio/skip` — přeskočit na další skladbu
+- `POST /api/radio/play` — `{ uuid }` přehrát konkrétní skladbu v rádiu

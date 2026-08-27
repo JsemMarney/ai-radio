@@ -18,6 +18,15 @@ type LibraryTrack = {
   status: string;
 };
 
+type RadioNowPlaying = {
+  uuid: string;
+  title: string;
+  artist: string;
+  album: string | null;
+  year: string | null;
+  thumbnail: string | null;
+};
+
 type ImportJob = {
   id: string;
   type: string;
@@ -37,20 +46,13 @@ type ImportJob = {
   }[];
 };
 
+const STREAM_URL = "/api/radio/stream";
+
 function formatDuration(seconds: number | null): string {
   if (seconds == null || !Number.isFinite(seconds)) return "—";
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-function shuffle<T>(items: T[]): T[] {
-  const arr = [...items];
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
 }
 
 export default function Home() {
@@ -62,24 +64,53 @@ export default function Home() {
   const [previewUuid, setPreviewUuid] = useState<string | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const libraryRef = useRef<LibraryTrack[]>([]);
-  const bagRef = useRef<string[]>([]);
-  const radioActiveRef = useRef(false);
-  const switchingRef = useRef(false);
+  const trackStartedAtRef = useRef<string | null>(null);
   const [radioOn, setRadioOn] = useState(false);
-  const [radioTrack, setRadioTrack] = useState<LibraryTrack | null>(null);
+  const [nowPlaying, setNowPlaying] = useState<RadioNowPlaying | null>(null);
+  const [streamReady, setStreamReady] = useState(false);
+  const [absoluteStreamUrl, setAbsoluteStreamUrl] = useState(STREAM_URL);
 
   const loadLibrary = useCallback(async () => {
     try {
       const res = await fetch("/api/library");
       const data = (await res.json()) as { tracks?: LibraryTrack[]; error?: string };
       if (!res.ok) throw new Error(data.error || "Nelze načíst knihovnu.");
-      const tracks = data.tracks ?? [];
-      setLibrary(tracks);
-      libraryRef.current = tracks;
+      setLibrary(data.tracks ?? []);
     } catch (err) {
       console.error(err);
     }
+  }, []);
+
+  const pollStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/radio/status");
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        nowPlaying?: RadioNowPlaying | null;
+        trackStartedAt?: string | null;
+      };
+      const next = data.nowPlaying ?? null;
+      const startedAt = data.trackStartedAt ?? null;
+      setNowPlaying((prev) => {
+        if (!next) return null;
+        if (prev?.uuid === next.uuid) return prev;
+        if (
+          startedAt &&
+          trackStartedAtRef.current &&
+          startedAt < trackStartedAtRef.current
+        ) {
+          return prev;
+        }
+        trackStartedAtRef.current = startedAt;
+        return next;
+      });
+    } catch {
+      // ignore transient poll errors
+    }
+  }, []);
+
+  useEffect(() => {
+    setAbsoluteStreamUrl(`${window.location.origin}${STREAM_URL}`);
   }, []);
 
   useEffect(() => {
@@ -87,8 +118,10 @@ export default function Home() {
   }, [loadLibrary]);
 
   useEffect(() => {
-    libraryRef.current = library;
-  }, [library]);
+    void pollStatus();
+    const timer = setInterval(() => void pollStatus(), 2000);
+    return () => clearInterval(timer);
+  }, [pollStatus]);
 
   useEffect(() => {
     if (!job || job.status === "done" || job.status === "failed") return;
@@ -109,6 +142,30 @@ export default function Home() {
 
     return () => clearInterval(timer);
   }, [job, loadLibrary]);
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+
+    setStreamReady(true);
+
+    const onPlay = () => {
+      setRadioOn(true);
+      setPreviewUuid(null);
+      if (!el.src || !el.src.includes(STREAM_URL)) {
+        el.src = STREAM_URL;
+        el.load();
+      }
+    };
+    const onPause = () => setRadioOn(false);
+
+    el.addEventListener("play", onPlay);
+    el.addEventListener("pause", onPause);
+    return () => {
+      el.removeEventListener("play", onPlay);
+      el.removeEventListener("pause", onPause);
+    };
+  }, []);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -138,122 +195,50 @@ export default function Home() {
     }
   }
 
-  const refillBag = useCallback(() => {
-    const ready = libraryRef.current.filter((t) => t.downloadUrl);
-    const ids = shuffle(ready.map((t) => t.uuid));
-    // avoid instantly repeating the last played track when possible
-    if (ids.length > 1 && radioTrack?.uuid && ids[0] === radioTrack.uuid) {
-      const first = ids.shift()!;
-      ids.push(first);
-    }
-    bagRef.current = ids;
-  }, [radioTrack?.uuid]);
-
-  const playTrack = useCallback(async (track: LibraryTrack) => {
-    const el = audioRef.current;
-    if (!el || !track.downloadUrl) return;
-
-    switchingRef.current = true;
-    setRadioTrack(track);
-    setRadioOn(true);
-    setPreviewUuid(null);
-    radioActiveRef.current = true;
-
-    try {
-      el.pause();
-      el.src = track.downloadUrl;
-      el.load();
-      await el.play();
-    } catch {
-      // browser may abort during rapid skips; retry once
-      try {
-        await el.play();
-      } catch {
-        // ignore
-      }
-    } finally {
-      switchingRef.current = false;
-    }
-  }, []);
-
-  const playNextRandom = useCallback(() => {
-    const lib = libraryRef.current.filter((t) => t.downloadUrl);
-    if (!lib.length) return;
-
-    for (let attempt = 0; attempt < lib.length + 2; attempt++) {
-      if (!bagRef.current.length) refillBag();
-      if (!bagRef.current.length) return;
-
-      const nextId = bagRef.current.shift()!;
-      const track = lib.find((t) => t.uuid === nextId);
-      if (track) {
-        void playTrack(track);
-        return;
-      }
-    }
-  }, [playTrack, refillBag]);
-
-  // Continuous radio: when a song ends, always queue the next random one
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-
-    const onEnded = () => {
-      if (!radioActiveRef.current) return;
-      playNextRandom();
-    };
-
-    const onPlay = () => setRadioOn(true);
-    const onPause = () => {
-      if (switchingRef.current) return;
-      // user paused via controls — stop continuous radio
-      if (el.ended) return;
-      setRadioOn(false);
-      radioActiveRef.current = false;
-    };
-
-    el.addEventListener("ended", onEnded);
-    el.addEventListener("play", onPlay);
-    el.addEventListener("pause", onPause);
-    return () => {
-      el.removeEventListener("ended", onEnded);
-      el.removeEventListener("play", onPlay);
-      el.removeEventListener("pause", onPause);
-    };
-  }, [playNextRandom]);
-
   function toggleRadio() {
     const el = audioRef.current;
     if (!el) return;
 
-    if (radioActiveRef.current && !el.paused) {
-      radioActiveRef.current = false;
+    if (!el.paused) {
       el.pause();
-      setRadioOn(false);
       return;
     }
 
-    // resume or start continuous random radio
-    radioActiveRef.current = true;
-    if (radioTrack?.downloadUrl && el.src) {
-      setRadioOn(true);
-      void el.play().catch(() => {
-        playNextRandom();
-      });
-      return;
+    if (!el.src || !el.src.includes(STREAM_URL)) {
+      el.src = STREAM_URL;
+      el.load();
     }
 
-    playNextRandom();
+    setPreviewUuid(null);
+    void el.play().catch(() => {
+      // stream may not be ready yet (empty library)
+    });
   }
 
-  function playFromLibrary(track: LibraryTrack) {
-    radioActiveRef.current = true;
-    // rebuild bag without this track first so "next" continues randomly after
-    const others = libraryRef.current
-      .filter((t) => t.downloadUrl && t.uuid !== track.uuid)
-      .map((t) => t.uuid);
-    bagRef.current = shuffle(others);
-    void playTrack(track);
+  async function skipTrack() {
+    await fetch("/api/radio/skip", { method: "POST" });
+    void pollStatus();
+  }
+
+  async function playOnRadio(track: LibraryTrack) {
+    setPreviewUuid(null);
+    await fetch("/api/radio/play", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uuid: track.uuid }),
+    });
+    void pollStatus();
+
+    const el = audioRef.current;
+    if (el) {
+      if (!el.src || !el.src.includes(STREAM_URL)) {
+        el.src = STREAM_URL;
+        el.load();
+      }
+      if (el.paused) {
+        void el.play().catch(() => {});
+      }
+    }
   }
 
   const jobProgress = useMemo(() => {
@@ -277,7 +262,8 @@ export default function Home() {
         </h1>
         <p className="mt-4 max-w-2xl text-base leading-relaxed text-[var(--ink-muted)]">
           Vlož Spotify track nebo playlist. Skladby se uloží do UUID složek
-          (info + mp3). Radio náhodně hraje ze všech stažených písní.
+          (info + mp3). Radio streamuje náhodně — po dohrání jde další, co teď
+          nehrála.
         </p>
       </header>
 
@@ -360,16 +346,24 @@ export default function Home() {
 
       {/* Radio */}
       <section className="animate-fade-up" style={{ animationDelay: "100ms" }}>
-        <h2 className="mb-3 font-[family-name:var(--font-display)] text-xl text-[var(--ink)]">
-          Radio
-        </h2>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h2 className="font-[family-name:var(--font-display)] text-xl text-[var(--ink)]">
+            Radio
+          </h2>
+          <a
+            href="/player"
+            className="text-sm text-[var(--accent-soft)] transition hover:text-[var(--accent)]"
+          >
+            Otevřít player →
+          </a>
+        </div>
         <div className="rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/80 p-5 sm:p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
             <div className="h-24 w-24 shrink-0 overflow-hidden rounded-xl bg-[var(--bg-deep)]">
-              {radioTrack?.thumbnail ? (
+              {nowPlaying?.thumbnail ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
-                  src={radioTrack.thumbnail}
+                  src={nowPlaying.thumbnail}
                   alt=""
                   className="h-full w-full object-cover"
                 />
@@ -381,15 +375,15 @@ export default function Home() {
             </div>
             <div className="min-w-0 flex-1">
               <p className="truncate font-[family-name:var(--font-display)] text-2xl text-[var(--ink)]">
-                {radioTrack?.title ?? "Nic nehraje"}
+                {nowPlaying?.title ?? "Nic nehraje"}
               </p>
               <p className="truncate text-[var(--accent-soft)]">
-                {radioTrack?.artist ?? "Spusť rádio ze stažené knihovny"}
+                {nowPlaying?.artist ?? "Spusť rádio ze stažené knihovny"}
               </p>
-              {radioTrack?.year && (
+              {nowPlaying?.year && (
                 <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                  {radioTrack.year}
-                  {radioTrack.album ? ` · ${radioTrack.album}` : ""}
+                  {nowPlaying.year}
+                  {nowPlaying.album ? ` · ${nowPlaying.album}` : ""}
                 </p>
               )}
             </div>
@@ -397,14 +391,14 @@ export default function Home() {
               <button
                 type="button"
                 onClick={toggleRadio}
-                disabled={!library.length}
+                disabled={!library.length || !streamReady}
                 className="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--bg-deep)] disabled:opacity-40"
               >
                 {radioOn ? "Pauza" : "Play"}
               </button>
               <button
                 type="button"
-                onClick={playNextRandom}
+                onClick={() => void skipTrack()}
                 disabled={!library.length}
                 className="rounded-xl border border-[var(--line)] px-4 py-2 text-sm text-[var(--ink)] disabled:opacity-40"
               >
@@ -412,9 +406,16 @@ export default function Home() {
               </button>
             </div>
           </div>
-          <audio ref={audioRef} className="mt-4 w-full" controls preload="auto" />
+          <audio ref={audioRef} className="mt-4 w-full" controls preload="none" />
+          <div className="mt-3 rounded-xl border border-[var(--line)] bg-[var(--bg-deep)]/50 px-3 py-2">
+            <p className="text-xs text-[var(--ink-muted)]">Stream URL (VLC, telefon…)</p>
+            <code className="mt-1 block truncate text-sm text-[var(--accent-soft)]">
+              {absoluteStreamUrl}
+            </code>
+          </div>
           <p className="mt-2 text-xs text-[var(--ink-muted)]">
-            Po Play rádio samo střídá náhodné skladby. Pauza vypne autoplay.
+            Jeden živý stream — po dohrání skladby server sám pustí náhodnou
+            další, dokud neprojde celá knihovna.
           </p>
         </div>
       </section>
@@ -440,7 +441,7 @@ export default function Home() {
               <li
                 key={track.uuid}
                 className={`flex gap-3 overflow-hidden rounded-2xl border p-3 transition ${
-                  preview?.uuid === track.uuid || radioTrack?.uuid === track.uuid
+                  nowPlaying?.uuid === track.uuid
                     ? "border-[var(--accent)]/50 bg-[var(--bg-panel)]"
                     : "border-[var(--line)] bg-[var(--bg-panel)]/60"
                 }`}
@@ -469,7 +470,7 @@ export default function Home() {
                     <button
                       type="button"
                       className="rounded-lg border border-[var(--line)] px-2.5 py-1 text-xs text-[var(--ink)]"
-                      onClick={() => playFromLibrary(track)}
+                      onClick={() => void playOnRadio(track)}
                     >
                       Přehrát
                     </button>
