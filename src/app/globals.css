@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+:root {
+  --bg-deep: #0f1a14;
+  --bg-mid: #16241c;
+  --bg-panel: #1c2e24;
+  --ink: #e8efe6;
+  --ink-muted: #9aaf9f;
+  --accent: #d4a24c;
+  --accent-soft: #e8c57a;
+  --line: rgba(232, 239, 230, 0.12);
+  --danger: #e07a6a;
+  --ok: #7dbe8a;
+}
+
+@theme inline {
+  --color-background: var(--bg-deep);
+  --color-foreground: var(--ink);
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  background:
+    radial-gradient(ellipse 90% 60% at 10% -10%, rgba(212, 162, 76, 0.14), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 95% 10%, rgba(70, 120, 90, 0.22), transparent 50%),
+    linear-gradient(165deg, var(--bg-deep) 0%, var(--bg-mid) 48%, #101a13 100%);
+  background-attachment: fixed;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(212, 162, 76, 0.35);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgba(212, 162, 76, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(212, 162, 76, 0);
+  }
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.45s ease-out both;
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.6s ease-out infinite;
+}
+
+.vinyl-spin {
+  animation: spin-slow 8s linear infinite;
+}
