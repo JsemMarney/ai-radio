@@ -3,6 +3,7 @@ import { access, constants, mkdir, readdir, rename, unlink } from "node:fs/promi
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { probeDuration, resolveFfmpeg } from "@/lib/ffmpeg";
 import {
   createTrackRecord,
   findBySpotifyId,
@@ -51,45 +52,6 @@ async function resolveYtDlp(): Promise<string> {
   throw new Error(
     "yt-dlp nenalezen. Nainstaluj ho (`pip install yt-dlp`) nebo nastav YTDLP_PATH.",
   );
-}
-
-async function resolveFfmpeg(): Promise<string | null> {
-  const candidates = [
-    process.env.FFMPEG_PATH,
-    "ffmpeg",
-    path.join(process.env.USERPROFILE ?? "", "scoop", "shims", "ffmpeg.exe"),
-    path.join(
-      process.env.LOCALAPPDATA ?? "",
-      "Microsoft",
-      "WinGet",
-      "Links",
-      "ffmpeg.exe",
-    ),
-    "C:\\ffmpeg\\bin\\ffmpeg.exe",
-    path.join(
-      process.env.LOCALAPPDATA ?? "",
-      "Programs",
-      "ffmpeg",
-      "bin",
-      "ffmpeg.exe",
-    ),
-    path.join(
-      process.env.HOME ?? "",
-      "Library/Python/3.9/lib/python/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
-    ),
-    "/opt/homebrew/bin/ffmpeg",
-    "/usr/local/bin/ffmpeg",
-  ].filter(Boolean) as string[];
-
-  for (const candidate of candidates) {
-    try {
-      await execFileAsync(candidate, ["-version"], { timeout: 8000 });
-      return candidate;
-    } catch {
-      // try next
-    }
-  }
-  return null;
 }
 
 function pathSeparator(): string {
@@ -339,6 +301,7 @@ export async function importSpotifyTrack(
     }
 
     const finalPath = await normalizeToTrackFile(filepath, trackDir, ffmpeg);
+    const probedDuration = await probeDuration(finalPath);
     const now = new Date().toISOString();
 
     const ready: LibraryTrack = {
@@ -347,6 +310,7 @@ export async function importSpotifyTrack(
       sourceUrl: typeof info.webpage_url === "string" ? info.webpage_url : null,
       extractor: typeof info.extractor === "string" ? info.extractor : "youtube",
       audioFile: path.basename(finalPath),
+      duration: probedDuration ?? record.duration,
       status: "ready",
       error: null,
       updatedAt: now,
@@ -395,9 +359,11 @@ export async function ensureTrackMp3(uuid: string): Promise<string | null> {
 
   const info = await readTrackInfo(uuid);
   if (info) {
+    const probed = await probeDuration(mp3Path);
     await writeTrackInfo({
       ...info,
       audioFile: "track.mp3",
+      duration: probed ?? info.duration,
       updatedAt: new Date().toISOString(),
     });
   }

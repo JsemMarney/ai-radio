@@ -26,21 +26,26 @@ if [ ! -f ".env.local" ] && [ -f ".env.example" ]; then
   echo
 fi
 
-# Uvolni port 3000, pokud na nem jeste bezi stary Next server z tohoto projektu
+# Uvolni port 8787, pokud na nem jeste bezi stary Next server z tohoto projektu
 if command -v lsof >/dev/null 2>&1; then
-  PIDS=$(lsof -tiTCP:3000 -sTCP:LISTEN 2>/dev/null || true)
+  PIDS=$(lsof -tiTCP:8787 -sTCP:LISTEN 2>/dev/null || true)
   if [ -n "$PIDS" ]; then
-    echo "Zastavuji stary server na portu 3000 (PID: $PIDS)..."
+    echo "Zastavuji stary server na portu 8787 (PID: $PIDS)..."
     # shellcheck disable=SC2086
     kill $PIDS 2>/dev/null || true
     sleep 1
   fi
 fi
 
-echo "Spoustim http://127.0.0.1:3000 ..."
+if [ -f "downloads/.radio-broadcast.lock" ]; then
+  echo "Cistim stary broadcast lock..."
+  rm -f "downloads/.radio-broadcast.lock"
+fi
+
+echo "Spoustim http://127.0.0.1:8787 ..."
 echo "Ukonceni: Ctrl+C"
 echo
 
-(sleep 2 && open "http://127.0.0.1:3000" >/dev/null 2>&1) &
+(sleep 2 && open "http://127.0.0.1:8787" >/dev/null 2>&1) &
 
-npm run dev -- -H 127.0.0.1 -p 3000
+npm run dev

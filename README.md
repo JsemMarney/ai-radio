@@ -1,12 +1,12 @@
 # AI Radio
 
-Next.js appka: Spotify track/playlist → UUID knihovna (info + mp3) → rádio náhodně ze stažených písní.
+Vlastní internetové rádio: Spotify → stažené MP3 → živý HTTP stream s crossfade přechody.
 
 ## Požadavky
 
 - Node.js 20+
 - `yt-dlp` — `pip install yt-dlp`
-- ffmpeg (volitelné, pro MP3) — systémově, nebo `pip install imageio-ffmpeg`
+- **ffmpeg** (povinné pro MP3 a crossfade) — `scoop install ffmpeg` / `brew install ffmpeg`
 - Spotify API klíče: [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
 
 ## Setup
@@ -16,44 +16,73 @@ npm install
 cp .env.example .env.local
 ```
 
-Do `.env.local`:
-
-```
-SPOTIFY_CLIENT_ID=...
-SPOTIFY_CLIENT_SECRET=...
-```
+Vyplň `.env.local` — minimálně Spotify klíče, `STUDIO_PASSWORD` a branding.
 
 ## Spuštění
 
-- macOS: dvojklik na `start.command`
-- Windows: `start.bat`
-- nebo `npm run dev`
+```bash
+npm run dev
+```
 
-Otevři [http://127.0.0.1:3000](http://127.0.0.1:3000).
+- **Posluchači:** [http://127.0.0.1:8787/player](http://127.0.0.1:8787/player)
+- **Studio (import):** [http://127.0.0.1:8787/studio](http://127.0.0.1:8787/studio)
+- **Stream URL:** `http://127.0.0.1:8787/api/radio/stream` (VLC, telefon…)
 
 ## Jak to funguje
 
-1. Vložíš Spotify **track** nebo **playlist** (max 50 skladeb).
-2. Metadata ze Spotify API, audio přes yt-dlp (YouTube search).
-3. Každá píseň = `downloads/{uuid}/info.json` + `track.mp3`.
-4. Stejné Spotify ID se znovu nestahuje.
-5. **Radio** streamuje náhodně ze všech ready skladeb (shuffle bag bez opakování, dokud neprojde celá fronta). Po dohrání skladby server sám pustí další.
+1. Ve **studiu** importuješ Spotify track nebo playlist (max 50 skladeb).
+2. yt-dlp stáhne audio, ffmpeg uloží jako `track.mp3` do `downloads/{uuid}/`.
+3. Server **pořád běží** jako rádio — shuffle bag, bez opakování dokud neprojde celá knihovna.
+4. Mezi skladbami je **crossfade ~4 s** (ffmpeg `acrossfade`).
+5. Posluchači se připojí na `/player` nebo přímo na stream URL.
 
-## Stream
+## Stránky
 
-Živý radio stream (jako Zeno.fm) — otevři v prohlížeči, VLC nebo jiném přehrávači:
+| URL | Přístup | Účel |
+|-----|---------|------|
+| `/player` | Veřejný | Poslech, QR kód, nedávno hrálo |
+| `/studio` | Heslo (`STUDIO_PASSWORD`) | Import, knihovna, skip, do rádií |
+| `/api/radio/stream` | Veřejný | Živý audio stream |
 
-```
-http://127.0.0.1:3000/api/radio/stream
+## Env proměnné
+
+| Proměnná | Popis |
+|----------|-------|
+| `SPOTIFY_CLIENT_ID` / `SECRET` | Spotify API |
+| `STUDIO_PASSWORD` | Heslo pro studio a admin API |
+| `STATION_NAME` | Název stanice |
+| `STATION_TAGLINE` | Podtitul |
+| `STATION_LOGO_URL` | Cesta k logu (např. `/brand/logo.svg`) |
+| `STATION_COLOR_*` | Barvy UI |
+| `RADIO_CROSSFADE_SEC` | Délka crossfade (default 4) |
+| `RADIO_TRANSITION` | `crossfade` nebo `cut` |
+
+## Veřejné nasazení
+
+1. **VPS / Railway / Fly.io** s Node 20+, ffmpeg a yt-dlp v PATH.
+2. **Persistent disk** pro složku `downloads/`.
+3. **HTTPS** (Let's Encrypt) — nutné pro autoplay v prohlížečích.
+4. Nastav env proměnné na serveru (necommituj `.env.local`).
+5. Sdílej `https://tvoje-domena.cz/player` a stream `https://tvoje-domena.cz/api/radio/stream`.
+
+### Produkcí
+
+```bash
+npm run build
+npm run start
 ```
 
 ## API
 
-- `POST /api/import` — `{ url }` → track nebo playlist job
-- `GET /api/jobs/:id` — progress playlistu
-- `GET /api/library` — seznam stažených
-- `GET /api/audio/:uuid` — jednotlivý mp3 soubor
-- `GET /api/radio/stream` — živý radio stream (audio/mpeg)
-- `GET /api/radio/status` — právě hraje
-- `POST /api/radio/skip` — přeskočit na další skladbu
-- `POST /api/radio/play` — `{ uuid }` přehrát konkrétní skladbu v rádiu
+**Veřejné:**
+- `GET /api/radio/stream` — živý stream
+- `GET /api/radio/status` — právě hraje, recently played
+- `GET /api/station/config` — branding
+
+**Chráněné (studio heslo):**
+- `POST /api/import` — import Spotify
+- `GET /api/library` — knihovna
+- `DELETE /api/library/:uuid` — smazat skladbu
+- `POST /api/radio/skip` — další skladba
+- `POST /api/radio/play` — `{ uuid }` přehrát teď
+- `POST /api/studio/login` / `logout`

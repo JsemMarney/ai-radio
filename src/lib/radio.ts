@@ -1,11 +1,20 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { createReadStream } from "node:fs";
 import type { ReadStream } from "node:fs";
 import { getTrack, listTracks } from "@/lib/library";
 import {
+  getCrossfadeSec,
+  getRadioTransition,
+  resolveFfmpeg,
+} from "@/lib/ffmpeg";
+import {
+  adjustListenerCount,
+  cleanupStaleBroadcastLock,
   readRadioState,
   refreshBroadcastLock,
+  setBroadcasting,
   tryAcquireBroadcastLock,
-  writeRadioState,
+  updateNowPlaying,
   type RadioNowPlaying,
 } from "@/lib/radio-state";
 import { ensureTrackMp3 } from "@/lib/ytdlp";
@@ -26,6 +35,10 @@ function shuffle<T>(items: T[]): T[] {
   return arr;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 class RadioStation {
   private subscribers = new Set<Subscriber>();
   private bag: string[] = [];
@@ -36,12 +49,15 @@ class RadioStation {
   private skipRequested = false;
   private playRequestUuid: string | null = null;
   private currentStream: ReadStream | null = null;
+  private currentProc: ChildProcess | null = null;
+  private ffmpegPath: string | null = null;
+  private lockTimer: ReturnType<typeof setInterval> | null = null;
+  private retryTimer: ReturnType<typeof setInterval> | null = null;
 
   nowPlaying: RadioNowPlaying | null = null;
-
-  get listenerCount(): number {
-    return this.subscribers.size;
-  }
+  trackStartedAt: string | null = null;
+  recentlyPlayed: RadioNowPlaying[] = [];
+  listenerCount = 0;
 
   get queueRemaining(): number {
     return this.bag.length;
@@ -74,6 +90,7 @@ class RadioStation {
           },
         };
         station.subscribers.add(subscriber);
+        void station.onListenerJoined();
         void station.start();
       },
       cancel() {
@@ -85,34 +102,78 @@ class RadioStation {
   }
 
   skip(): void {
-    this.skipRequested = true;
-    this.currentStream?.destroy();
+    this.stopCurrent();
   }
 
   playNow(uuid: string): void {
     this.playRequestUuid = uuid;
-    this.skipRequested = true;
-    this.currentStream?.destroy();
+    this.stopCurrent();
   }
 
   async start(): Promise<void> {
-    if (this.loopStarted) return;
+    await this.hydrateFromDisk();
+
+    if (this.loopStarted) {
+      if (!this.isBroadcaster) void this.tryBecomeBroadcaster();
+      return;
+    }
     this.loopStarted = true;
 
-    const state = await readRadioState();
-    if (state?.nowPlaying) {
-      this.nowPlaying = state.nowPlaying;
-    }
+    this.ffmpegPath = await resolveFfmpeg();
+    await this.tryBecomeBroadcaster();
 
-    this.isBroadcaster = await tryAcquireBroadcastLock();
-    if (this.isBroadcaster) {
-      void this.runLoop();
+    if (!this.retryTimer) {
+      this.retryTimer = setInterval(() => {
+        if (!this.isBroadcaster) void this.tryBecomeBroadcaster();
+      }, 10_000);
     }
   }
 
-  private unsubscribe(subscriber: Subscriber): void {
+  private async hydrateFromDisk(): Promise<void> {
+    const state = await readRadioState();
+    this.nowPlaying = state.nowPlaying;
+    this.trackStartedAt = state.trackStartedAt;
+    this.recentlyPlayed = state.recentlyPlayed ?? [];
+    this.listenerCount = state.listenerCount ?? 0;
+  }
+
+  private async tryBecomeBroadcaster(): Promise<void> {
+    if (this.isBroadcaster || this.loopRunning) return;
+
+    await cleanupStaleBroadcastLock();
+    const acquired = await tryAcquireBroadcastLock();
+    if (!acquired) return;
+
+    this.isBroadcaster = true;
+    await setBroadcasting(true);
+    await this.hydrateFromDisk();
+
+    if (!this.lockTimer) {
+      this.lockTimer = setInterval(() => {
+        void refreshBroadcastLock();
+      }, 8_000);
+    }
+
+    void this.runLoop();
+  }
+
+  private async onListenerJoined(): Promise<void> {
+    this.listenerCount = await adjustListenerCount(1);
+  }
+
+  private stopCurrent(): void {
+    this.skipRequested = true;
+    this.currentStream?.destroy();
+    this.currentStream = null;
+    this.currentProc?.kill("SIGKILL");
+    this.currentProc = null;
+  }
+
+  private async unsubscribe(subscriber: Subscriber): Promise<void> {
     subscriber.close();
-    this.subscribers.delete(subscriber);
+    if (this.subscribers.delete(subscriber)) {
+      this.listenerCount = await adjustListenerCount(-1);
+    }
   }
 
   private broadcast(chunk: Buffer): void {
@@ -160,8 +221,26 @@ class RadioStation {
     return null;
   }
 
-  private async setNowPlaying(uuid: string): Promise<void> {
+  private async getDuration(uuid: string): Promise<number> {
     const track = await getTrack(uuid);
+    if (track?.duration && track.duration > 0) return track.duration;
+    return 180;
+  }
+
+  private async setNowPlaying(
+    uuid: string,
+    options?: { atCrossfade?: boolean; finishedPrevious?: boolean },
+  ): Promise<void> {
+    const track = await getTrack(uuid);
+    const previous = this.nowPlaying;
+    const atCrossfade = options?.atCrossfade ?? false;
+    const addPrevious =
+      options?.finishedPrevious &&
+      previous?.uuid &&
+      previous.uuid !== uuid
+        ? previous
+        : undefined;
+
     if (!track) {
       this.nowPlaying = {
         uuid,
@@ -171,31 +250,26 @@ class RadioStation {
         year: null,
         thumbnail: null,
       };
-      await writeRadioState(this.nowPlaying);
-      return;
+    } else {
+      this.nowPlaying = {
+        uuid: track.uuid,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        year: track.year,
+        thumbnail: track.thumbnail,
+      };
     }
 
-    this.nowPlaying = {
-      uuid: track.uuid,
-      title: track.title,
-      artist: track.artist,
-      album: track.album,
-      year: track.year,
-      thumbnail: track.thumbnail,
-    };
-    await writeRadioState(this.nowPlaying);
+    await updateNowPlaying(this.nowPlaying, {
+      atCrossfade,
+      addPreviousToRecent: addPrevious,
+    });
+    await this.hydrateFromDisk();
   }
 
-  private async streamTrack(uuid: string): Promise<void> {
-    const filepath = await ensureTrackMp3(uuid);
-    if (!filepath) return;
-
+  private async streamRawFile(filepath: string): Promise<void> {
     this.skipRequested = false;
-    this.lastPlayedUuid = uuid;
-    await this.setNowPlaying(uuid);
-    await refreshBroadcastLock();
-
-    const startedAt = Date.now();
 
     await new Promise<void>((resolve) => {
       const stream = createReadStream(filepath);
@@ -219,28 +293,220 @@ class RadioStation {
         resolve();
       });
     });
+  }
 
-    const elapsed = Date.now() - startedAt;
-    if (elapsed < 1500 && !this.skipRequested) {
-      await new Promise((r) => setTimeout(r, 1500 - elapsed));
+  private async streamFfmpeg(args: string[]): Promise<void> {
+    if (!this.ffmpegPath) return;
+    this.skipRequested = false;
+
+    await new Promise<void>((resolve) => {
+      const proc = spawn(this.ffmpegPath!, args, {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      this.currentProc = proc;
+
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        if (this.skipRequested) {
+          proc.kill("SIGKILL");
+          return;
+        }
+        this.broadcast(chunk);
+      });
+
+      proc.on("close", () => {
+        this.currentProc = null;
+        resolve();
+      });
+
+      proc.on("error", () => {
+        this.currentProc = null;
+        resolve();
+      });
+    });
+  }
+
+  private mp3OutArgs(): string[] {
+    return ["-f", "mp3", "-b:a", "192k", "-write_xing", "0", "pipe:1"];
+  }
+
+  private async streamBody(
+    filepath: string,
+    offsetSec: number,
+    durationSec: number,
+  ): Promise<void> {
+    if (durationSec <= 0.25) return;
+
+    if (this.ffmpegPath) {
+      const args = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        String(offsetSec),
+        "-i",
+        filepath,
+        "-t",
+        String(durationSec),
+        ...this.mp3OutArgs(),
+      ];
+      await this.streamFfmpeg(args);
+      return;
     }
+
+    await this.streamRawFile(filepath);
+  }
+
+  private async streamCrossfade(
+    pathA: string,
+    offsetA: number,
+    pathB: string,
+    fadeSec: number,
+  ): Promise<void> {
+    if (!this.ffmpegPath || fadeSec <= 0) {
+      await this.streamRawFile(pathA);
+      await this.streamRawFile(pathB);
+      return;
+    }
+
+    const args = [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-ss",
+      String(offsetA),
+      "-i",
+      pathA,
+      "-i",
+      pathB,
+      "-filter_complex",
+      `[0:a][1:a]acrossfade=d=${fadeSec}:c1=tri:c2=tri`,
+      ...this.mp3OutArgs(),
+    ];
+    await this.streamFfmpeg(args);
+  }
+
+  private computeFade(durA: number, durB: number, fadeSec: number): number {
+    const maxFade = Math.min(
+      fadeSec,
+      durA * 0.4,
+      durB * 0.4,
+      durA - 0.5,
+      durB - 0.5,
+    );
+    return Math.max(0, maxFade);
+  }
+
+  private async resolveTrackPath(uuid: string): Promise<string | null> {
+    await refreshBroadcastLock();
+    return ensureTrackMp3(uuid);
+  }
+
+  private async streamPair(currentUuid: string, nextUuid: string): Promise<void> {
+    const pathA = await this.resolveTrackPath(currentUuid);
+    const pathB = await this.resolveTrackPath(nextUuid);
+    if (!pathA || !pathB) {
+      this.bag = this.bag.filter((id) => id !== currentUuid && id !== nextUuid);
+      return;
+    }
+
+    const durA = await this.getDuration(currentUuid);
+    const durB = await this.getDuration(nextUuid);
+    const fadeSec = getCrossfadeSec();
+    const useCrossfade =
+      getRadioTransition() === "crossfade" && this.ffmpegPath && fadeSec > 0;
+
+    this.skipRequested = false;
+    this.lastPlayedUuid = currentUuid;
+
+    if (!useCrossfade) {
+      await this.setNowPlaying(currentUuid);
+      await refreshBroadcastLock();
+      await this.streamRawFile(pathA);
+      return;
+    }
+
+    const fade = this.computeFade(durA, durB, fadeSec);
+    if (fade < 0.5) {
+      await this.setNowPlaying(currentUuid);
+      await refreshBroadcastLock();
+      await this.streamRawFile(pathA);
+      return;
+    }
+
+    const bodyA = durA - fade;
+    if (bodyA > 0.5) {
+      await this.setNowPlaying(currentUuid);
+      await refreshBroadcastLock();
+      await this.streamBody(pathA, 0, bodyA);
+    }
+
+    if (this.skipRequested) return;
+
+    await this.setNowPlaying(nextUuid, {
+      atCrossfade: true,
+      finishedPrevious: true,
+    });
+    await this.streamCrossfade(pathA, bodyA, pathB, fade);
+
+    if (this.skipRequested) return;
+
+    const bodyBStart = fade;
+    const bodyBLen = durB - 2 * fade;
+    if (bodyBLen > 0.5) {
+      await this.streamBody(pathB, bodyBStart, bodyBLen);
+    }
+  }
+
+  private async streamSolo(uuid: string): Promise<void> {
+    const filepath = await this.resolveTrackPath(uuid);
+    if (!filepath) {
+      this.bag = this.bag.filter((id) => id !== uuid);
+      return;
+    }
+
+    this.skipRequested = false;
+    this.lastPlayedUuid = uuid;
+    await this.setNowPlaying(uuid);
+    await refreshBroadcastLock();
+    await this.streamRawFile(filepath);
   }
 
   private async runLoop(): Promise<void> {
     if (this.loopRunning) return;
     this.loopRunning = true;
 
-    while (true) {
-      const uuid = await this.pickNext();
-      if (!uuid) {
-        this.nowPlaying = null;
-        await writeRadioState(null);
-        await new Promise((r) => setTimeout(r, 3000));
+    let currentUuid = await this.pickNext();
+
+    while (this.isBroadcaster) {
+      if (!currentUuid) {
+        await sleep(3000);
+        currentUuid = await this.pickNext();
         continue;
       }
 
-      await this.streamTrack(uuid);
+      const nextUuid = await this.pickNext();
+      if (!nextUuid || nextUuid === currentUuid) {
+        await this.streamSolo(currentUuid);
+        if (this.skipRequested) {
+          this.skipRequested = false;
+          currentUuid = await this.pickNext();
+          continue;
+        }
+        currentUuid = await this.pickNext();
+        continue;
+      }
+
+      await this.streamPair(currentUuid, nextUuid);
+      if (this.skipRequested) {
+        this.skipRequested = false;
+        currentUuid = await this.pickNext();
+        continue;
+      }
+
+      currentUuid = nextUuid;
     }
+
+    this.loopRunning = false;
   }
 }
 

@@ -1,153 +1,86 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
-
-type RadioNowPlaying = {
-  uuid: string;
-  title: string;
-  artist: string;
-  album: string | null;
-  year: string | null;
-  thumbnail: string | null;
-};
-
-const STREAM_URL = "/api/radio/stream";
+import { useEffect, useState } from "react";
+import { OnAirBadge, StationBranding } from "@/components/StationBranding";
+import { useRadio } from "@/components/RadioProvider";
 
 export default function PlayerPage() {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const trackStartedAtRef = useRef<string | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [nowPlaying, setNowPlaying] = useState<RadioNowPlaying | null>(null);
-  const [listeners, setListeners] = useState(0);
-  const [streamUrl, setStreamUrl] = useState(STREAM_URL);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    playing,
+    nowPlaying,
+    recentlyPlayed,
+    listeners,
+    broadcasting,
+    streamUrl,
+    connection,
+    error,
+    toggle,
+    reconnect,
+    volume,
+    setVolume,
+    play,
+  } = useRadio();
+  const [copied, setCopied] = useState(false);
 
-  const pollStatus = useCallback(async () => {
+  const recentList = recentlyPlayed.filter((t) => t.uuid !== nowPlaying?.uuid);
+
+  useEffect(() => {
+    const timer = setTimeout(() => play(), 600);
+    return () => clearTimeout(timer);
+  }, [play]);
+
+  async function copyStreamUrl() {
     try {
-      const res = await fetch("/api/radio/status");
-      if (!res.ok) return;
-      const data = (await res.json()) as {
-        nowPlaying?: RadioNowPlaying | null;
-        trackStartedAt?: string | null;
-        listeners?: number;
-      };
-      const next = data.nowPlaying ?? null;
-      const startedAt = data.trackStartedAt ?? null;
-
-      setNowPlaying((prev) => {
-        if (!next) return null;
-        if (prev?.uuid === next.uuid) return prev;
-        if (
-          startedAt &&
-          trackStartedAtRef.current &&
-          startedAt < trackStartedAtRef.current
-        ) {
-          return prev;
-        }
-        trackStartedAtRef.current = startedAt;
-        return next;
-      });
-      setListeners(data.listeners ?? 0);
+      await navigator.clipboard.writeText(streamUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     } catch {
       // ignore
     }
-  }, []);
+  }
 
-  useEffect(() => {
-    setStreamUrl(`${window.location.origin}${STREAM_URL}`);
-  }, []);
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(streamUrl)}`;
 
-  useEffect(() => {
-    void pollStatus();
-    const timer = setInterval(() => void pollStatus(), 2000);
-    return () => clearInterval(timer);
-  }, [pollStatus]);
-
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-
-    const onPlay = () => {
-      setPlaying(true);
-      setError(null);
-    };
-    const onPause = () => setPlaying(false);
-    const onError = () => {
-      setError("Stream se nepodařilo přehrát. Zkus to znovu.");
-      setPlaying(false);
-    };
-
-    el.addEventListener("play", onPlay);
-    el.addEventListener("pause", onPause);
-    el.addEventListener("error", onError);
-    return () => {
-      el.removeEventListener("play", onPlay);
-      el.removeEventListener("pause", onPause);
-      el.removeEventListener("error", onError);
-    };
-  }, []);
-
-  function connectStream() {
-    const el = audioRef.current;
-    if (!el) return false;
-    if (!el.src || !el.src.includes(STREAM_URL)) {
-      el.src = STREAM_URL;
-      el.load();
+  const statusLine = (() => {
+    if (connection === "connecting" || connection === "reconnecting") {
+      return "Připojuji ke streamu…";
     }
-    return true;
-  }
-
-  function togglePlay() {
-    const el = audioRef.current;
-    if (!el) return;
-
-    if (!el.paused) {
-      el.pause();
-      return;
+    if (!nowPlaying && broadcasting) {
+      return "Načítám skladbu…";
     }
-
-    if (!connectStream()) return;
-
-    void el.play().catch(() => {
-      setError("Přehrávání zablokováno prohlížečem. Klikni znovu na Play.");
-    });
-  }
-
-  async function skipTrack() {
-    await fetch("/api/radio/skip", { method: "POST" });
-    void pollStatus();
-
-    const el = audioRef.current;
-    if (!el || !playing) return;
-    if (!connectStream()) return;
-
-    el.pause();
-    el.load();
-    void el.play().catch(() => {});
-  }
+    if (!nowPlaying && !broadcasting) {
+      return "Rádio startuje — chvilku strpení";
+    }
+    if (nowPlaying) return nowPlaying.artist;
+    return "Klikni Play pro poslech";
+  })();
 
   return (
     <main className="relative mx-auto flex min-h-screen w-full max-w-lg flex-col items-center justify-center px-5 py-10">
       <Link
-        href="/"
-        className="absolute left-5 top-6 text-sm text-[var(--ink-muted)] transition hover:text-[var(--accent-soft)]"
+        href="/studio"
+        className="absolute right-5 top-6 text-sm text-[var(--ink-muted)] transition hover:text-[var(--accent-soft)]"
       >
-        ← Knihovna
+        Studio
       </Link>
 
-      <div className="animate-fade-up w-full text-center">
-        <p className="mb-2 text-xs font-semibold tracking-[0.3em] text-[var(--accent)] uppercase">
-          AI Radio
-        </p>
-        <h1 className="font-[family-name:var(--font-display)] text-3xl text-[var(--ink)]">
-          Live
-        </h1>
-        {listeners > 0 && (
-          <p className="mt-2 text-xs text-[var(--ink-muted)]">
-            {listeners} {listeners === 1 ? "posluchač" : listeners < 5 ? "posluchači" : "posluchačů"}
+      <div className="animate-fade-up w-full">
+        <StationBranding size="lg" />
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
+          <OnAirBadge live={broadcasting || playing} />
+          <p className="text-xs text-[var(--ink-muted)]">
+            {listeners}{" "}
+            {listeners === 1
+              ? "posluchač"
+              : listeners < 5
+                ? "posluchači"
+                : "posluchačů"}
           </p>
-        )}
+          {connection === "connecting" || connection === "reconnecting" ? (
+            <span className="text-xs text-[var(--accent-soft)]">● připojuji</span>
+          ) : null}
+        </div>
       </div>
 
       <div
@@ -163,12 +96,19 @@ export default function PlayerPage() {
             <img
               key={nowPlaying.uuid}
               src={nowPlaying.thumbnail}
-              alt=""
+              alt={nowPlaying.title}
               className="h-full w-full object-cover"
             />
           ) : (
-            <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
-              —
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-[var(--ink-muted)]">
+              {broadcasting || connection !== "idle" ? (
+                <>
+                  <span className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--accent)]" />
+                  <span>Načítám…</span>
+                </>
+              ) : (
+                "—"
+              )}
             </div>
           )}
         </div>
@@ -178,13 +118,13 @@ export default function PlayerPage() {
       <div
         className="animate-fade-up w-full text-center"
         style={{ animationDelay: "120ms" }}
+        aria-live="polite"
+        aria-atomic="true"
       >
         <p className="truncate font-[family-name:var(--font-display)] text-2xl text-[var(--ink)]">
           {nowPlaying?.title ?? "Čekám na skladbu…"}
         </p>
-        <p className="mt-1 truncate text-[var(--accent-soft)]">
-          {nowPlaying?.artist ?? (playing ? "…" : "Rádio běží — klikni Play")}
-        </p>
+        <p className="mt-1 truncate text-[var(--accent-soft)]">{statusLine}</p>
         {nowPlaying?.album && (
           <p className="mt-2 truncate text-sm text-[var(--ink-muted)]">
             {nowPlaying.year ? `${nowPlaying.year} · ` : ""}
@@ -194,25 +134,52 @@ export default function PlayerPage() {
       </div>
 
       <div
-        className="animate-fade-up mt-10 flex items-center justify-center gap-4"
+        className="animate-fade-up mt-10 flex flex-col items-center gap-5"
         style={{ animationDelay: "160ms" }}
       >
-        <button
-          type="button"
-          onClick={togglePlay}
-          className={`flex h-16 w-16 items-center justify-center rounded-full bg-[var(--accent)] text-lg font-bold text-[var(--bg-deep)] transition hover:bg-[var(--accent-soft)] ${playing ? "" : "animate-pulse-ring"}`}
-          aria-label={playing ? "Pauza" : "Přehrát"}
-        >
-          {playing ? "❚❚" : "▶"}
-        </button>
-        <button
-          type="button"
-          onClick={() => void skipTrack()}
-          disabled={!playing}
-          className="rounded-xl border border-[var(--line)] px-5 py-3 text-sm text-[var(--ink)] transition hover:border-[var(--accent)]/40 disabled:opacity-40"
-        >
-          Další
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={toggle}
+            className={`flex h-16 w-16 items-center justify-center rounded-full bg-[var(--accent)] text-lg font-bold text-[var(--bg-deep)] transition hover:bg-[var(--accent-soft)] ${playing ? "" : "animate-pulse-ring"}`}
+            aria-label={playing ? "Pauza" : "Přehrát"}
+          >
+            {playing ? "❚❚" : "▶"}
+          </button>
+          {(error || connection === "reconnecting") && (
+            <button
+              type="button"
+              onClick={reconnect}
+              className="rounded-xl border border-[var(--line)] px-4 py-2 text-sm text-[var(--ink)] hover:border-[var(--accent)]/40"
+            >
+              Znovu připojit
+            </button>
+          )}
+        </div>
+
+        <div className="flex w-full max-w-xs items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setVolume(volume > 0 ? 0 : readLastVolume())}
+            className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent-soft)]"
+            aria-label={volume > 0 ? "Ztlumit" : "Zapnout zvuk"}
+          >
+            {volume === 0 ? "🔇" : volume < 0.35 ? "🔈" : volume < 0.7 ? "🔉" : "🔊"}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={volume}
+            onChange={(e) => setVolume(Number(e.target.value))}
+            className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-[var(--line)] accent-[var(--accent)]"
+            aria-label="Hlasitost"
+          />
+          <span className="w-9 text-right text-xs tabular-nums text-[var(--ink-muted)]">
+            {Math.round(volume * 100)}%
+          </span>
+        </div>
       </div>
 
       {error && (
@@ -224,20 +191,61 @@ export default function PlayerPage() {
         </p>
       )}
 
+      {recentList.length > 0 && (
+        <div className="mt-8 w-full">
+          <p className="mb-2 text-xs font-semibold tracking-wider text-[var(--ink-muted)] uppercase">
+            Nedávno hrálo
+          </p>
+          <ul className="space-y-2">
+            {recentList.map((track) => (
+              <li
+                key={track.uuid}
+                className="truncate rounded-xl border border-[var(--line)] bg-[var(--bg-panel)]/50 px-3 py-2 text-sm"
+              >
+                <span className="text-[var(--ink)]">{track.title}</span>
+                <span className="text-[var(--ink-muted)]"> · {track.artist}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div
         className="animate-fade-up mt-8 w-full rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/60 p-4"
         style={{ animationDelay: "200ms" }}
       >
-        <p className="text-xs text-[var(--ink-muted)]">Stream API</p>
-        <code className="mt-1 block truncate text-sm text-[var(--accent-soft)]">
-          {streamUrl}
-        </code>
-        <p className="mt-2 text-xs leading-relaxed text-[var(--ink-muted)]">
-          Funguje v prohlížeči, VLC nebo jakémkoli přehrávači co umí HTTP stream.
-        </p>
+        <p className="text-xs text-[var(--ink-muted)]">Sdílet stanici</p>
+        <div className="mt-3 flex flex-col items-center gap-4 sm:flex-row">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={qrUrl}
+            alt="QR kód streamu"
+            className="h-28 w-28 rounded-lg border border-[var(--line)] bg-white p-1"
+          />
+          <div className="min-w-0 flex-1">
+            <code className="block truncate text-sm text-[var(--accent-soft)]">
+              {streamUrl}
+            </code>
+            <button
+              type="button"
+              onClick={() => void copyStreamUrl()}
+              className="mt-3 rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs text-[var(--ink)] hover:border-[var(--accent)]/40"
+            >
+              {copied ? "Zkopírováno!" : "Kopírovat URL"}
+            </button>
+            <p className="mt-2 text-xs leading-relaxed text-[var(--ink-muted)]">
+              Funguje v prohlížeči, VLC nebo na telefonu.
+            </p>
+          </div>
+        </div>
       </div>
-
-      <audio ref={audioRef} className="sr-only" preload="none" />
     </main>
   );
+}
+
+function readLastVolume(): number {
+  if (typeof window === "undefined") return 0.85;
+  const raw = localStorage.getItem("ai-radio-volume");
+  const n = raw ? Number(raw) : 0.85;
+  return Number.isFinite(n) && n > 0 ? n : 0.85;
 }

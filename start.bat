@@ -28,16 +28,21 @@ if not exist ".env.local" if exist ".env.example" (
   echo.
 )
 
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3000" ^| findstr "LISTENING"') do (
-  echo Zastavuji stary server na portu 3000 ^(PID: %%a^)...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8787" ^| findstr "LISTENING"') do (
+  echo Zastavuji stary server na portu 8787 ^(PID: %%a^)...
   taskkill /PID %%a /F >nul 2>&1
 )
 
-echo Spoustim http://127.0.0.1:3000 ...
+if exist "downloads\.radio-broadcast.lock" (
+  echo Cistim stary broadcast lock...
+  del /f /q "downloads\.radio-broadcast.lock" >nul 2>&1
+)
+
+echo Spoustim http://127.0.0.1:8787 ...
 echo Ukonceni: Ctrl+C
 echo.
 
-start "" "http://127.0.0.1:3000"
-call npm run dev -- -H 127.0.0.1 -p 3000
+start "" "http://127.0.0.1:8787"
+call npm run dev
 
 pause
