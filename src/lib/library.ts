@@ -4,6 +4,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -20,6 +21,8 @@ export type LibraryTrack = {
   album: string | null;
   year: string | null;
   releaseDate: string | null;
+  /** Délka dle Spotify / katalogu — neprepisovat probem z YouTube. */
+  catalogDuration?: number | null;
   duration: number | null;
   thumbnail: string | null;
   webpageUrl: string;
@@ -27,6 +30,14 @@ export type LibraryTrack = {
   sourceUrl: string | null;
   extractor: string | null;
   audioFile: string | null;
+  broadcastFile?: string | null;
+  /** Sekundy odříznuté z intro ticha (po masteringu). */
+  trimStart?: number | null;
+  /** Sekundy odříznuté z outro ticha. */
+  trimEnd?: number | null;
+  /** Délka po masteringu — používá DJ loop. */
+  playDuration?: number | null;
+  processedAt?: string | null;
   status: LibraryTrackStatus;
   error: string | null;
   createdAt: string;
@@ -34,6 +45,9 @@ export type LibraryTrack = {
 };
 
 const AUDIO_EXTS = [".mp3", ".m4a", ".opus", ".webm", ".ogg", ".wav", ".mp4"];
+
+/** Pre-renderovaný soubor pro broadcast — bez runtime filtrů. */
+export const BROADCAST_FILENAME = "track.broadcast.mp3";
 
 export function getDownloadsDir(): string {
   return path.join(process.cwd(), "downloads");
@@ -52,6 +66,19 @@ export async function ensureDownloadsDir(): Promise<string> {
   await mkdir(dir, { recursive: true });
   await mkdir(path.join(dir, "jobs"), { recursive: true });
   return dir;
+}
+
+export async function findBroadcastInDir(dir: string): Promise<string | null> {
+  const broadcast = path.join(dir, BROADCAST_FILENAME);
+  if (existsSync(broadcast)) return broadcast;
+  return null;
+}
+
+export async function resolveBroadcastPath(uuid: string): Promise<string | null> {
+  const dir = getTrackDir(uuid);
+  const broadcast = await findBroadcastInDir(dir);
+  if (broadcast) return broadcast;
+  return resolveAudioPath(uuid);
 }
 
 export async function findAudioInDir(dir: string): Promise<string | null> {
@@ -123,7 +150,43 @@ export async function listTracks(options?: {
   }
 
   tracks.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return tracks;
+  return dedupeBySpotifyId(tracks);
+}
+
+/** Jedna skladba na Spotify ID — nejlepší kopie (ready, delší audio). */
+export function dedupeBySpotifyId(tracks: LibraryTrack[]): LibraryTrack[] {
+  const byKey = new Map<string, LibraryTrack>();
+
+  const score = (t: LibraryTrack): number => {
+    let s = 0;
+    if (t.status === "ready") s += 1000;
+    s += t.playDuration ?? t.duration ?? 0;
+    return s;
+  };
+
+  for (const track of tracks) {
+    const key = track.spotifyId || track.uuid;
+    const existing = byKey.get(key);
+    if (!existing || score(track) > score(existing)) {
+      byKey.set(key, track);
+    }
+  }
+
+  return [...byKey.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function listTracksWithAudio(options?: {
+  readyOnly?: boolean;
+}): Promise<LibraryTrack[]> {
+  const tracks = await listTracks(options);
+  if (!options?.readyOnly) return tracks;
+
+  const withAudio: LibraryTrack[] = [];
+  for (const track of tracks) {
+    const audio = await findAudioInDir(getTrackDir(track.uuid));
+    if (audio) withAudio.push(track);
+  }
+  return withAudio;
 }
 
 export async function findBySpotifyId(
@@ -167,6 +230,7 @@ export function createTrackRecord(
     album: meta.album,
     year: meta.year,
     releaseDate: meta.releaseDate,
+    catalogDuration: meta.duration,
     duration: meta.duration,
     thumbnail: meta.thumbnail,
     webpageUrl: meta.webpageUrl,
@@ -190,4 +254,42 @@ export async function resolveAudioPath(uuid: string): Promise<string | null> {
   }
 
   return findAudioInDir(dir);
+}
+
+async function rmTrackDir(dir: string, retries = 6): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      const code =
+        err instanceof Error && "code" in err
+          ? String((err as NodeJS.ErrnoException).code)
+          : "";
+      if (code === "ENOENT") return;
+      lastError = err;
+      if (attempt < retries - 1) {
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/** Smaže skladbu z disku (s retry — Windows drží soubor otevřený při streamu). */
+export async function deleteLibraryTrack(uuid: string): Promise<void> {
+  const track = await getTrack(uuid);
+  if (!track) {
+    throw new Error("Skladba nenalezena.");
+  }
+
+  const dir = getTrackDir(uuid);
+  try {
+    await access(dir);
+  } catch {
+    return;
+  }
+
+  await rmTrackDir(dir);
 }

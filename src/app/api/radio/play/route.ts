@@ -1,4 +1,4 @@
-import { getRadioStation } from "@/lib/radio";
+import { brokerFetch } from "@/lib/radio-broker";
 import { getTrack } from "@/lib/library";
 
 export const runtime = "nodejs";
@@ -17,6 +17,11 @@ export async function POST(request: Request) {
     return Response.json({ error: "Skladba není připravená." }, { status: 404 });
   }
 
-  getRadioStation().playNow(uuid);
-  return Response.json({ ok: true });
+  const res = await brokerFetch("/play", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uuid }),
+  });
+  const data = await res.json();
+  return Response.json(data, { status: res.status });
 }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getDownloadsDir, findBySpotifyId } from "@/lib/library";
+import { invalidateTrackCache } from "@/lib/radio-playlist";
 import { importSpotifyTrack } from "@/lib/ytdlp";
 import type { SpotifyTrackMeta } from "@/lib/spotify";
 
@@ -18,7 +19,7 @@ export type ImportJobItem = {
 
 export type ImportJob = {
   id: string;
-  type: "playlist" | "track";
+  type: "playlist" | "album" | "track";
   title: string;
   status: ImportJobStatus;
   total: number;
@@ -66,11 +67,12 @@ export async function getJob(id: string): Promise<ImportJob | null> {
 export async function createPlaylistJob(input: {
   title: string;
   tracks: SpotifyTrackMeta[];
+  source?: "playlist" | "album";
 }): Promise<ImportJob> {
   const now = new Date().toISOString();
   const job: ImportJob = {
     id: randomUUID(),
-    type: "playlist",
+    type: input.source ?? "playlist",
     title: input.title,
     status: "queued",
     total: input.tracks.length,
@@ -140,6 +142,7 @@ async function runPlaylistJob(
         latest.items[i].error = null;
         latest.completed += 1;
         await saveJob(latest);
+        invalidateTrackCache();
       } catch (error) {
         const latest = await getJob(jobId);
         if (!latest) return;

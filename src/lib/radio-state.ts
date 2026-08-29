@@ -19,6 +19,9 @@ export type PersistedRadioState = {
   listenerCount: number;
   broadcasting: boolean;
   broadcasterPid: number | null;
+  sessionId: string | null;
+  playlistBag: string[];
+  lastPlayedUuid: string | null;
   updatedAt: string;
 };
 
@@ -85,10 +88,36 @@ export async function cleanupStaleBroadcastLock(): Promise<boolean> {
   return true;
 }
 
+let stateWriteChain: Promise<void> = Promise.resolve();
+
 async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
-  const tmp = `${filePath}.tmp`;
-  await writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
-  await rename(tmp, filePath);
+  await ensureDownloadsDir();
+  const payload = JSON.stringify(data, null, 2);
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await writeFile(tmp, payload, "utf8");
+      try {
+        await rename(tmp, filePath);
+      } catch {
+        await unlink(filePath).catch(() => {});
+        await rename(tmp, filePath);
+      }
+      return;
+    } catch (err) {
+      await unlink(tmp).catch(() => {});
+      if (attempt === 4) throw err;
+      await new Promise((r) => setTimeout(r, 25 * (attempt + 1)));
+    }
+  }
+}
+
+async function writeState(state: PersistedRadioState): Promise<void> {
+  state.updatedAt = new Date().toISOString();
+  const job = stateWriteChain.then(() => atomicWriteJson(statePath(), state));
+  stateWriteChain = job.catch(() => {});
+  await job;
 }
 
 const DEFAULT_STATE = (): PersistedRadioState => ({
@@ -98,6 +127,9 @@ const DEFAULT_STATE = (): PersistedRadioState => ({
   listenerCount: 0,
   broadcasting: false,
   broadcasterPid: null,
+  sessionId: null,
+  playlistBag: [],
+  lastPlayedUuid: null,
   updatedAt: new Date().toISOString(),
 });
 
@@ -113,18 +145,15 @@ export async function readRadioState(): Promise<PersistedRadioState> {
         listenerCount: parsed.listenerCount ?? 0,
         broadcasting: parsed.broadcasting ?? false,
         broadcasterPid: parsed.broadcasterPid ?? null,
+        sessionId: parsed.sessionId ?? null,
+        playlistBag: parsed.playlistBag ?? [],
+        lastPlayedUuid: parsed.lastPlayedUuid ?? null,
       };
     } catch {
       if (attempt < 2) await new Promise((r) => setTimeout(r, 25));
     }
   }
   return DEFAULT_STATE();
-}
-
-async function writeState(state: PersistedRadioState): Promise<void> {
-  await ensureDownloadsDir();
-  state.updatedAt = new Date().toISOString();
-  await atomicWriteJson(statePath(), state);
 }
 
 export async function tryAcquireBroadcastLock(): Promise<boolean> {
@@ -170,13 +199,17 @@ export async function releaseBroadcastLock(): Promise<void> {
   }
 }
 
-export async function setBroadcasting(active: boolean): Promise<void> {
+export async function setBroadcasting(active: boolean): Promise<PersistedRadioState> {
   const existing = await readRadioState();
-  await writeState({
+  const sessionId = active ? crypto.randomUUID() : existing.sessionId;
+  const state: PersistedRadioState = {
     ...existing,
     broadcasting: active,
     broadcasterPid: active ? process.pid : null,
-  });
+    sessionId,
+  };
+  await writeState(state);
+  return state;
 }
 
 export async function adjustListenerCount(delta: number): Promise<number> {
@@ -184,6 +217,14 @@ export async function adjustListenerCount(delta: number): Promise<number> {
   const listenerCount = Math.max(0, (existing.listenerCount ?? 0) + delta);
   await writeState({ ...existing, listenerCount });
   return listenerCount;
+}
+
+export async function writePlaylistState(
+  playlistBag: string[],
+  lastPlayedUuid: string | null,
+): Promise<void> {
+  const existing = await readRadioState();
+  await writeState({ ...existing, playlistBag, lastPlayedUuid });
 }
 
 export async function writeRadioState(
@@ -219,14 +260,19 @@ export async function writeRadioState(
 /** Atomically update nowPlaying + optionally append to recently played. */
 export async function updateNowPlaying(
   nowPlaying: RadioNowPlaying | null,
-  options?: { atCrossfade?: boolean; addPreviousToRecent?: RadioNowPlaying },
-): Promise<void> {
+  options?: {
+    atCrossfade?: boolean;
+    addPreviousToRecent?: RadioNowPlaying;
+    /** Nový začátek skladby — při startu přehrávání, ne při metadata refreshi. */
+    restartTrackClock?: boolean;
+  },
+): Promise<PersistedRadioState> {
   const existing = await readRadioState();
 
   let trackStartedAt: string | null;
   if (!nowPlaying) {
     trackStartedAt = null;
-  } else if (options?.atCrossfade) {
+  } else if (options?.atCrossfade || options?.restartTrackClock) {
     trackStartedAt = new Date().toISOString();
   } else if (
     existing.nowPlaying?.uuid === nowPlaying.uuid &&
@@ -255,6 +301,14 @@ export async function updateNowPlaying(
     trackStartedAt,
     recentlyPlayed,
   });
+
+  return {
+    ...existing,
+    nowPlaying,
+    trackStartedAt,
+    recentlyPlayed,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 export async function pushRecentlyPlayed(track: RadioNowPlaying): Promise<void> {

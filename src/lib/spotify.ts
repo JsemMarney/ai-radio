@@ -51,9 +51,21 @@ export function extractSpotifyPlaylistId(url: string): string | null {
   }
 }
 
+export function extractSpotifyAlbumId(url: string): string | null {
+  try {
+    const parsed = new URL(url.trim());
+    if (!isSpotifyHost(parsed.hostname)) return null;
+    const match = parsed.pathname.match(/\/album\/([a-zA-Z0-9]+)/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export type SpotifyUrlKind =
   | { kind: "track"; id: string }
   | { kind: "playlist"; id: string }
+  | { kind: "album"; id: string }
   | { kind: "unknown" };
 
 export function parseSpotifyUrl(url: string): SpotifyUrlKind {
@@ -61,6 +73,8 @@ export function parseSpotifyUrl(url: string): SpotifyUrlKind {
   if (trackId) return { kind: "track", id: trackId };
   const playlistId = extractSpotifyPlaylistId(url);
   if (playlistId) return { kind: "playlist", id: playlistId };
+  const albumId = extractSpotifyAlbumId(url);
+  if (albumId) return { kind: "album", id: albumId };
   return { kind: "unknown" };
 }
 
@@ -246,6 +260,97 @@ export async function fetchSpotifyPlaylist(
     webpageUrl:
       playlist.external_urls?.spotify ??
       `https://open.spotify.com/playlist/${playlist.id}`,
+    tracks: tracks.slice(0, limit),
+    truncated: truncated && tracks.length >= limit,
+  };
+}
+
+export async function fetchSpotifyAlbum(
+  url: string,
+  limit = PLAYLIST_IMPORT_LIMIT,
+): Promise<SpotifyPlaylistMeta> {
+  const albumId = extractSpotifyAlbumId(url);
+  if (!albumId) {
+    throw new Error(
+      "Vlož platný odkaz na Spotify album (open.spotify.com/album/...).",
+    );
+  }
+
+  const token = await getSpotifyToken();
+
+  const albumRes = await fetch(
+    `https://api.spotify.com/v1/albums/${albumId}?fields=id,name,release_date,images,external_urls,artists(name)`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    },
+  );
+
+  if (!albumRes.ok) {
+    const text = await albumRes.text();
+    throw new Error(`Spotify album API chyba (${albumRes.status}): ${text}`);
+  }
+
+  const album = (await albumRes.json()) as {
+    id: string;
+    name: string;
+    release_date?: string;
+    images?: { url: string }[];
+    external_urls?: { spotify?: string };
+    artists?: { name: string }[];
+  };
+
+  const albumInfo = {
+    name: album.name,
+    release_date: album.release_date,
+    images: album.images,
+  };
+
+  const artistLabel =
+    (album.artists ?? []).map((a) => a.name).join(", ") || "Various Artists";
+
+  const tracks: SpotifyTrackMeta[] = [];
+  let nextUrl: string | null =
+    `https://api.spotify.com/v1/albums/${albumId}/tracks?limit=50&fields=next,items(id,name,duration_ms,external_urls,artists(name))`;
+
+  while (nextUrl && tracks.length < limit) {
+    const pageRes = await fetch(nextUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
+    if (!pageRes.ok) {
+      const text = await pageRes.text();
+      throw new Error(`Spotify album tracks API chyba (${pageRes.status}): ${text}`);
+    }
+
+    const page = (await pageRes.json()) as {
+      next: string | null;
+      items: SpotifyApiTrack[];
+    };
+
+    for (const item of page.items) {
+      if (!item.id) continue;
+      tracks.push(
+        mapTrack({
+          ...item,
+          album: albumInfo,
+        }),
+      );
+      if (tracks.length >= limit) break;
+    }
+
+    nextUrl = page.next;
+  }
+
+  const truncated = Boolean(nextUrl) || tracks.length >= limit;
+
+  return {
+    id: album.id,
+    name: `${album.name} — ${artistLabel}`,
+    description: `Album · ${tracks.length} skladeb`,
+    webpageUrl:
+      album.external_urls?.spotify ??
+      `https://open.spotify.com/album/${album.id}`,
     tracks: tracks.slice(0, limit),
     truncated: truncated && tracks.length >= limit,
   };

@@ -1,9 +1,14 @@
 import { execFile } from "node:child_process";
-import { access, constants, mkdir, readdir, rename, unlink } from "node:fs/promises";
+import { access, constants, copyFile, mkdir, readdir, rename, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { probeDuration, resolveFfmpeg } from "@/lib/ffmpeg";
+import {
+  renderBroadcastFile,
+  type AudioTrim,
+} from "@/lib/audio-process";
+import { ensureBroadcastFile } from "@/lib/remaster";
 import {
   createTrackRecord,
   findBySpotifyId,
@@ -41,7 +46,14 @@ const YOUTUBE_CLIENT_ARGS =
 
 async function resolveYtDlp(): Promise<string> {
   for (const candidate of YTDLP_CANDIDATES) {
-    if (candidate === "yt-dlp") return candidate;
+    if (candidate === "yt-dlp") {
+      try {
+        await execFileAsync(candidate, ["--version"], { timeout: 8000 });
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
     try {
       await access(candidate, constants.X_OK);
       return candidate;
@@ -71,6 +83,25 @@ function ytdlpEnv(ytdlp: string, ffmpeg: string | null) {
 }
 
 function shortError(error: unknown): string {
+  if (error && typeof error === "object") {
+    const withStderr = error as { stderr?: string | Buffer; message?: string };
+    const stderr = withStderr.stderr
+      ? String(withStderr.stderr)
+      : "";
+    if (stderr) {
+      const line =
+        stderr
+          .split("\n")
+          .map((l) => l.trim())
+          .find((l) => l.startsWith("ERROR:")) ??
+        stderr
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .at(-1);
+      if (line) return line.replace(/^ERROR:\s*/i, "").slice(0, 400);
+    }
+  }
   const raw = error instanceof Error ? error.message : String(error);
   const lines = raw
     .split("\n")
@@ -81,6 +112,74 @@ function shortError(error: unknown): string {
     lines.filter((l) => !l.startsWith("Command failed:")).at(-1) ||
     raw;
   return useful.replace(/^ERROR:\s*/i, "").slice(0, 400);
+}
+
+function buildSearchQueries(meta: SpotifyTrackMeta): string[] {
+  const base = searchQueryForTrack(meta);
+  return [
+    `${base} official audio`,
+    `${meta.artist} ${meta.title} topic`,
+    `${base} audio`,
+    base,
+  ];
+}
+
+type SearchHit = { url: string; title: string; score: number };
+
+function scoreSearchHit(
+  title: string,
+  meta: SpotifyTrackMeta,
+): number {
+  const t = title.toLowerCase();
+  const artist = meta.artist.toLowerCase();
+  const track = meta.title.toLowerCase();
+  let score = 0;
+  if (t.includes("official audio") || t.includes("provided to youtube")) score += 40;
+  if (t.includes("topic")) score += 30;
+  if (t.includes(artist)) score += 15;
+  if (t.includes(track)) score += 15;
+  if (t.includes("lyrics")) score -= 35;
+  if (t.includes("8d") || t.includes("slowed") || t.includes("reverb")) score -= 20;
+  if (t.includes("live") || t.includes("cover") || t.includes("karaoke")) score -= 25;
+  if (t.includes("remix") && !track.includes("remix")) score -= 10;
+  return score;
+}
+
+async function searchYouTube(
+  ytdlp: string,
+  ffmpeg: string | null,
+  query: string,
+  meta: SpotifyTrackMeta,
+): Promise<SearchHit[]> {
+  const stdout = await runYtDlp(
+    ytdlp,
+    [
+      "--flat-playlist",
+      "--no-warnings",
+      "--no-update",
+      "--extractor-args",
+      YOUTUBE_CLIENT_ARGS,
+      "--print",
+      "%(title)s\t%(webpage_url)s",
+      `ytsearch5:${query}`,
+    ],
+    ffmpeg,
+  );
+
+  const hits: SearchHit[] = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const tab = trimmed.indexOf("\t");
+    if (tab <= 0) continue;
+    const title = trimmed.slice(0, tab).trim();
+    const url = trimmed.slice(tab + 1).trim();
+    if (!url.startsWith("http")) continue;
+    hits.push({ url, title, score: scoreSearchHit(title, meta) });
+  }
+
+  hits.sort((a, b) => b.score - a.score);
+  return hits;
 }
 
 function pickDownloadedPath(info: Record<string, unknown>): string | null {
@@ -162,10 +261,11 @@ function buildDownloadArgs(
   const args = [
     "--no-playlist",
     "--no-warnings",
+    "--no-update",
     "--print-json",
     "--no-simulate",
     "-f",
-    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+    "bestaudio/best",
     "-o",
     outputTemplate,
     "--no-mtime",
@@ -174,15 +274,7 @@ function buildDownloadArgs(
   ];
 
   if (ffmpeg) {
-    args.push(
-      "--ffmpeg-location",
-      ffmpeg,
-      "-x",
-      "--audio-format",
-      "mp3",
-      "--audio-quality",
-      "0",
-    );
+    args.push("--ffmpeg-location", ffmpeg);
   }
 
   args.push(source);
@@ -218,35 +310,62 @@ async function normalizeToTrackFile(
   filepath: string,
   trackDir: string,
   ffmpeg: string | null,
-): Promise<string> {
+  catalogDuration?: number | null,
+): Promise<{ path: string; trim: AudioTrim | null }> {
+  const mp3Path = path.join(trackDir, "track.mp3");
+
+  if (!ffmpeg) {
+    const finalExt = path.extname(filepath).toLowerCase() || ".mp3";
+    const dest = path.join(trackDir, `track${finalExt}`);
+    if (path.resolve(filepath) !== path.resolve(dest)) {
+      if (existsSync(dest)) await unlink(dest).catch(() => {});
+      await rename(filepath, dest);
+    }
+    return { path: dest, trim: null };
+  }
+
   let source = filepath;
   const ext = path.extname(source).toLowerCase();
 
-  if (ext !== ".mp3" && ffmpeg) {
-    const mp3Path = path.join(trackDir, "track.mp3");
+  if (ext !== ".mp3") {
+    const tempMp3 = path.join(trackDir, "track.raw.mp3");
     await execFileAsync(
       ffmpeg,
-      ["-y", "-i", source, "-vn", "-acodec", "libmp3lame", "-q:a", "2", mp3Path],
+      ["-y", "-i", source, "-vn", "-acodec", "libmp3lame", "-q:a", "2", tempMp3],
       { timeout: 300_000 },
     );
-    if (path.resolve(source) !== path.resolve(mp3Path)) {
-      try {
-        await unlink(source);
-      } catch {
-        // ignore
-      }
+    if (path.resolve(source) !== path.resolve(tempMp3)) {
+      await unlink(source).catch(() => {});
     }
-    source = mp3Path;
+    source = tempMp3;
   }
 
-  const finalExt = path.extname(source).toLowerCase() || ".mp3";
-  const dest = path.join(trackDir, `track${finalExt}`);
-  if (path.resolve(source) === path.resolve(dest)) return dest;
-  if (existsSync(dest) && path.resolve(source) !== path.resolve(dest)) {
-    await unlink(dest).catch(() => {});
+  const sourceArchive = path.join(trackDir, "source.mp3");
+  if (path.resolve(source) !== path.resolve(sourceArchive)) {
+    await copyFile(source, sourceArchive).catch(() => {});
   }
-  await rename(source, dest);
-  return dest;
+
+  const rendered = await renderBroadcastFile(
+    sourceArchive,
+    trackDir,
+    ffmpeg,
+    undefined,
+    catalogDuration,
+  );
+
+  if (
+    path.resolve(source) !== path.resolve(rendered.masterPath) &&
+    source.includes(".raw.")
+  ) {
+    await unlink(source).catch(() => {});
+  }
+
+  return { path: rendered.masterPath, trim: rendered.trim };
+}
+
+/** Zmasteruje + pre-render broadcast, pokud ještě nebylo. */
+export async function ensureTrackProcessed(uuid: string): Promise<string | null> {
+  return ensureBroadcastFile(uuid);
 }
 
 /** Download audio for a Spotify track meta into a UUID library folder. */
@@ -270,29 +389,62 @@ export async function importSpotifyTrack(
         "ffmpeg nenalezen — bez něj se stahuje video (mp4). Nainstaluj ffmpeg (scoop install ffmpeg) nebo nastav FFMPEG_PATH.",
       );
     }
-    const query = searchQueryForTrack(meta);
     const outputTemplate = path.join(trackDir, "track.%(ext)s");
+    const queries = buildSearchQueries(meta);
+    const triedUrls = new Set<string>();
+    const errors: string[] = [];
 
-    const sources = [
-      `ytsearch1:${query} official audio`,
-      `ytsearch1:${query}`,
-      `scsearch1:${query}`,
-    ];
-
-    let lastError = "neznámá chyba";
     let info: Record<string, unknown> | null = null;
 
-    for (const source of sources) {
+    queryLoop: for (const query of queries) {
+      let hits: SearchHit[] = [];
       try {
-        info = await downloadFromSource(ytdlp, ffmpeg, outputTemplate, source);
-        break;
+        hits = await searchYouTube(ytdlp, ffmpeg, query, meta);
       } catch (error) {
-        lastError = shortError(error);
+        errors.push(`hledání „${query}“: ${shortError(error)}`);
+        continue;
+      }
+
+      if (!hits.length) {
+        errors.push(`hledání „${query}“: žádný výsledek`);
+        continue;
+      }
+
+      for (const hit of hits) {
+        if (triedUrls.has(hit.url)) continue;
+        triedUrls.add(hit.url);
+        try {
+          info = await downloadFromSource(
+            ytdlp,
+            ffmpeg,
+            outputTemplate,
+            hit.url,
+          );
+          const dlDuration =
+            typeof info.duration === "number" ? info.duration : 0;
+          if (
+            meta.duration &&
+            dlDuration > meta.duration * 1.12
+          ) {
+            errors.push(
+              `„${hit.title}“: moc dlouhé (${Math.round(dlDuration)}s vs katalog ${Math.round(meta.duration)}s)`,
+            );
+            info = null;
+            continue;
+          }
+          break queryLoop;
+        } catch (error) {
+          errors.push(`„${hit.title}“: ${shortError(error)}`);
+        }
       }
     }
 
     if (!info) {
-      throw new Error(lastError);
+      throw new Error(
+        errors.length
+          ? errors.slice(0, 3).join(" | ")
+          : "YouTube stažení selhalo.",
+      );
     }
 
     const filepath = await resolveFinalFilepath(info, trackDir);
@@ -300,8 +452,14 @@ export async function importSpotifyTrack(
       throw new Error("Stažení proběhlo, ale výsledný audio soubor se nenašel.");
     }
 
-    const finalPath = await normalizeToTrackFile(filepath, trackDir, ffmpeg);
+    const { path: finalPath, trim } = await normalizeToTrackFile(
+      filepath,
+      trackDir,
+      ffmpeg,
+      record.catalogDuration ?? record.duration,
+    );
     const probedDuration = await probeDuration(finalPath);
+    const catalog = record.catalogDuration ?? record.duration;
     const now = new Date().toISOString();
 
     const ready: LibraryTrack = {
@@ -310,7 +468,13 @@ export async function importSpotifyTrack(
       sourceUrl: typeof info.webpage_url === "string" ? info.webpage_url : null,
       extractor: typeof info.extractor === "string" ? info.extractor : "youtube",
       audioFile: path.basename(finalPath),
-      duration: probedDuration ?? record.duration,
+      broadcastFile: "track.broadcast.mp3",
+      catalogDuration: catalog,
+      duration: catalog ?? probedDuration,
+      trimStart: trim?.trimStart ?? 0,
+      trimEnd: trim?.trimEnd ?? 0,
+      playDuration: trim?.playDuration ?? probedDuration ?? catalog,
+      processedAt: now,
       status: "ready",
       error: null,
       updatedAt: now,
@@ -336,47 +500,9 @@ export function publicTrackPayload(track: LibraryTrack) {
   return toPublicTrack(track);
 }
 
-/** Convert track to mp3 if needed (e.g. legacy mp4 downloads). */
+/** Convert track to mp3 if needed + zmasterovat (ticho, normalizace). */
 export async function ensureTrackMp3(uuid: string): Promise<string | null> {
-  const filepath = await resolveAudioPath(uuid);
-  if (!filepath) return null;
-
-  const ext = path.extname(filepath).toLowerCase();
-  if (ext === ".mp3") return filepath;
-
-  const ffmpeg = await resolveFfmpeg();
-  if (!ffmpeg) return filepath;
-
-  const trackDir = getTrackDir(uuid);
-  const mp3Path = path.join(trackDir, "track.mp3");
-  if (existsSync(mp3Path)) return mp3Path;
-
-  await execFileAsync(
-    ffmpeg,
-    ["-y", "-i", filepath, "-vn", "-acodec", "libmp3lame", "-q:a", "2", mp3Path],
-    { timeout: 300_000 },
-  );
-
-  const info = await readTrackInfo(uuid);
-  if (info) {
-    const probed = await probeDuration(mp3Path);
-    await writeTrackInfo({
-      ...info,
-      audioFile: "track.mp3",
-      duration: probed ?? info.duration,
-      updatedAt: new Date().toISOString(),
-    });
-  }
-
-  if (path.resolve(filepath) !== path.resolve(mp3Path)) {
-    try {
-      await unlink(filepath);
-    } catch {
-      // ignore
-    }
-  }
-
-  return mp3Path;
+  return ensureTrackProcessed(uuid);
 }
 
 // re-export for audio route compatibility

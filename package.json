@@ -3,10 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -H 127.0.0.1 -p 8787",
+    "dev:web": "next dev -H 127.0.0.1 -p 8787",
+    "dev:radio": "tsx scripts/broadcaster.ts",
+    "dev": "concurrently -n web,radio -c blue,magenta \"npm run dev:web\" \"npm run dev:radio\"",
     "build": "next build",
-    "start": "next start -H 127.0.0.1 -p 8787",
-    "lint": "eslint"
+    "start:web": "next start -H 127.0.0.1 -p 8787",
+    "start:radio": "tsx scripts/broadcaster.ts",
+    "start": "concurrently -n web,radio -c blue,magenta \"npm run start:web\" \"npm run start:radio\"",
+    "lint": "eslint",
+    "generate:jingle": "node scripts/generate-jingle.mjs"
   },
   "dependencies": {
     "next": "16.3.3",
@@ -18,9 +23,11 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9",
     "eslint": "^9",
     "eslint-config-next": "16.3.3",
     "tailwindcss": "^4",
+    "tsx": "^4",
     "typescript": "^5"
   }
 }

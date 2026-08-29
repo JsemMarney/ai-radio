@@ -13,6 +13,9 @@ const PROTECTED_PREFIXES = [
   "/api/jobs",
   "/api/radio/skip",
   "/api/radio/play",
+  "/api/radio/test-transition",
+  "/api/radio/test-midsong",
+  "/api/radio/transition-preview",
 ];
 
 function isProtected(pathname: string): boolean {
@@ -47,5 +50,8 @@ export const config = {
     "/api/jobs/:path*",
     "/api/radio/skip",
     "/api/radio/play",
+    "/api/radio/test-transition",
+  "/api/radio/test-midsong",
+    "/api/radio/transition-preview",
   ],
 };

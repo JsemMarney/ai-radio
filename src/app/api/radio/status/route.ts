@@ -1,34 +1,26 @@
-import { cleanupStaleBroadcastLock, readRadioState, type RadioNowPlaying } from "@/lib/radio-state";
-import { getRadioStation } from "@/lib/radio";
+import { brokerFetch } from "@/lib/radio-broker";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function filterRecent(
-  recent: RadioNowPlaying[],
-  nowPlaying: RadioNowPlaying | null,
-): RadioNowPlaying[] {
-  if (!nowPlaying) return recent;
-  return recent.filter((t) => t.uuid !== nowPlaying.uuid);
-}
-
 export async function GET() {
-  await cleanupStaleBroadcastLock();
-  const station = getRadioStation();
-  await station.start();
-  const state = await readRadioState();
+  const res = await brokerFetch("/status");
+  if (!res.ok) {
+    return Response.json({
+      broadcasting: false,
+      offline: true,
+      nowPlaying: null,
+      trackStartedAt: null,
+      recentlyPlayed: [],
+      listeners: 0,
+      queueRemaining: 0,
+      streamUrl: "/api/radio/stream",
+    });
+  }
 
-  const nowPlaying = state.nowPlaying ?? station.nowPlaying;
-  const trackStartedAt = state.trackStartedAt ?? station.trackStartedAt;
-  const broadcasting = state.broadcasting || station.broadcasting;
-
+  const data = await res.json();
   return Response.json({
-    nowPlaying,
-    trackStartedAt,
-    recentlyPlayed: filterRecent(state.recentlyPlayed ?? [], nowPlaying),
-    listeners: Math.max(state.listenerCount ?? 0, station.listenerCount),
-    broadcasting,
-    queueRemaining: station.queueRemaining,
+    ...data,
     streamUrl: "/api/radio/stream",
   });
 }

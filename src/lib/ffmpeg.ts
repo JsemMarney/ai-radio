@@ -104,3 +104,32 @@ export function getCrossfadeSec(): number {
 export function getRadioTransition(): "crossfade" | "cut" {
   return process.env.RADIO_TRANSITION === "cut" ? "cut" : "crossfade";
 }
+
+export function mp3EncodeArgs(
+  mapLabel?: string,
+  outputPath = "pipe:1",
+): string[] {
+  const args: string[] = [];
+  if (mapLabel) args.push("-map", mapLabel);
+  args.push(
+    "-f", "mp3",
+    "-c:a", "libmp3lame",
+    "-b:a", "192k",
+    "-minrate", "192k",
+    "-maxrate", "192k",
+    "-bufsize", "384k",
+    "-write_xing", "0",
+    outputPath,
+  );
+  return args;
+}
+
+/** @deprecated use buildCrossfadeFilterGraph from audio-process.ts */
+export function buildCrossfadeFilter(fadeSec: number): string {
+  const d = fadeSec.toFixed(3);
+  return (
+    `[0:a]dynaudnorm=f=150:g=10[a0];` +
+    `[1:a]dynaudnorm=f=150:g=10[a1];` +
+    `[a0][a1]acrossfade=d=${d}:c1=exp:c2=exp[aout]`
+  );
+}

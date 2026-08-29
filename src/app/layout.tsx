@@ -1,18 +1,26 @@
 import type { Metadata } from "next";
 import type { CSSProperties } from "react";
-import { DM_Sans, Fraunces } from "next/font/google";
+import { Barlow, Barlow_Condensed, IBM_Plex_Mono } from "next/font/google";
 import { RadioProvider } from "@/components/RadioProvider";
 import { getStationConfig } from "@/lib/station-config";
 import "./globals.css";
 
-const sans = DM_Sans({
+const sans = Barlow({
   variable: "--font-sans",
   subsets: ["latin", "latin-ext"],
+  weight: ["400", "500", "600"],
 });
 
-const display = Fraunces({
+const display = Barlow_Condensed({
   variable: "--font-display",
   subsets: ["latin", "latin-ext"],
+  weight: ["600", "700"],
+});
+
+const mono = IBM_Plex_Mono({
+  variable: "--font-mono",
+  subsets: ["latin", "latin-ext"],
+  weight: ["400", "500"],
 });
 
 const station = getStationConfig();
@@ -26,7 +34,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="cs"
-      className={`${sans.variable} ${display.variable} h-full antialiased`}
+      className={`${sans.variable} ${display.variable} ${mono.variable} h-full antialiased`}
       style={
         {
           "--accent": station.colorAccent,

@@ -1,9 +1,10 @@
-import { getRadioStation } from "@/lib/radio";
+import { brokerFetch } from "@/lib/radio-broker";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST() {
-  getRadioStation().skip();
-  return Response.json({ ok: true });
+  const res = await brokerFetch("/skip", { method: "POST" });
+  const data = await res.json();
+  return Response.json(data, { status: res.status });
 }

@@ -5,10 +5,11 @@ export const runtime = "nodejs";
 
 export async function GET() {
   try {
-    const tracks = await listTracks({ readyOnly: true });
+    const tracks = await listTracks();
     return NextResponse.json({
       tracks: tracks.map(toPublicTrack),
       count: tracks.length,
+      ready: tracks.filter((t) => t.status === "ready").length,
     });
   } catch (error) {
     const message =

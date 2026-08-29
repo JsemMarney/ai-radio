@@ -54,7 +54,8 @@ npm run dev
 | `STATION_TAGLINE` | Podtitul |
 | `STATION_LOGO_URL` | Cesta k logu (např. `/brand/logo.svg`) |
 | `STATION_COLOR_*` | Barvy UI |
-| `RADIO_CROSSFADE_SEC` | Délka crossfade (default 4) |
+| `RADIO_CROSSFADE_SEC` | Délka crossfade v sekundách (default 4) |
+| `RADIO_CROSSFADE_CURVE` | `equalpower` (doporučeno), `linear`, `exp`, `log`, `qsin` |
 | `RADIO_TRANSITION` | `crossfade` nebo `cut` |
 
 ## Veřejné nasazení

@@ -1,19 +1,37 @@
-import { getRadioStation } from "@/lib/radio";
+import { brokerFetch } from "@/lib/radio-broker";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const station = getRadioStation();
-  await station.start();
-  const body = station.subscribe();
+const ICY_HEADERS = [
+  "icy-metaint",
+  "icy-name",
+  "icy-genre",
+  "icy-br",
+  "icy-url",
+  "icy-pub",
+] as const;
 
-  return new Response(body, {
-    headers: {
-      "Content-Type": "audio/mpeg",
-      "Cache-Control": "no-cache, no-store, must-revalidate",
-      Connection: "keep-alive",
-      "Transfer-Encoding": "chunked",
-    },
+export async function GET() {
+  const res = await brokerFetch("/stream");
+  if (!res.ok || !res.body) {
+    return new Response("Rádio stream není dostupný. Spusť broadcaster.", {
+      status: 503,
+    });
+  }
+
+  const headers = new Headers({
+    "Content-Type": res.headers.get("content-type") ?? "audio/mpeg",
+    "Cache-Control": "no-cache, no-store, must-revalidate, private",
+    Pragma: "no-cache",
+    "Accept-Ranges": "none",
+    Connection: "keep-alive",
   });
+
+  for (const key of ICY_HEADERS) {
+    const value = res.headers.get(key);
+    if (value) headers.set(key, value);
+  }
+
+  return new Response(res.body, { headers });
 }
