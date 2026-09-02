@@ -4,7 +4,12 @@ import { promisify } from "node:util";
 import { BROADCAST_FILENAME } from "@/lib/library";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { probeDuration } from "@/lib/ffmpeg";
+import { probeDuration, mp3EncodeArgs } from "@/lib/ffmpeg";
+import {
+  computePairFade,
+  computeTailFade,
+  pairCrossfadeStartSec,
+} from "@/lib/fade-math";
 
 const execFileAsync = promisify(execFile);
 
@@ -370,10 +375,17 @@ export function getJingleConfig(): JingleConfig {
 
 export type MidsongConfig = {
   paths: string[];
-  everyNTracks: number;
+  minTracks: number;
+  maxTracks: number;
   chance: number;
   fadeSec: number;
 };
+
+export function randomMidsongInterval(config: MidsongConfig): number {
+  const min = Math.max(1, config.minTracks);
+  const max = Math.max(min, config.maxTracks);
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
 
 function resolveMediaPath(raw: string): string | null {
   const trimmed = raw.trim();
@@ -384,12 +396,14 @@ function resolveMediaPath(raw: string): string | null {
   return null;
 }
 
-/** Krátké mezihry (MIDSONGS) mezi skladbami — lineární fade out/in. */
+/** Krátké stinger mezihry (MIDSONGS) mezi skladbami — fade out/in. */
 export function getMidsongConfig(): MidsongConfig {
   const fadeRaw = Number(
     process.env.RADIO_MIDSONG_FADE_SEC ?? process.env.RADIO_CROSSFADE_SEC ?? 4,
   );
-  const every = Number(process.env.RADIO_MIDSONG_EVERY ?? 1);
+  const minRaw = Number(process.env.RADIO_MIDSONG_MIN_TRACKS ?? 3);
+  const maxRaw = Number(process.env.RADIO_MIDSONG_MAX_TRACKS ?? 6);
+  const legacyEvery = Number(process.env.RADIO_MIDSONG_EVERY ?? 0);
   const chance = Number(process.env.RADIO_MIDSONG_CHANCE ?? 1);
 
   const paths: string[] = [];
@@ -412,9 +426,20 @@ export function getMidsongConfig(): MidsongConfig {
     }
   }
 
+  let minTracks =
+    Number.isFinite(minRaw) && minRaw > 0 ? Math.floor(minRaw) : 3;
+  let maxTracks =
+    Number.isFinite(maxRaw) && maxRaw > 0 ? Math.floor(maxRaw) : 6;
+  if (Number.isFinite(legacyEvery) && legacyEvery > 0) {
+    minTracks = Math.floor(legacyEvery);
+    maxTracks = Math.floor(legacyEvery);
+  }
+  if (maxTracks < minTracks) maxTracks = minTracks;
+
   return {
     paths,
-    everyNTracks: Number.isFinite(every) && every > 0 ? Math.floor(every) : 1,
+    minTracks,
+    maxTracks,
     chance:
       Number.isFinite(chance) && chance >= 0
         ? Math.min(chance, 1)
@@ -430,10 +455,7 @@ export function pickMidsongPath(config: MidsongConfig): string | null {
   return config.paths[idx] ?? null;
 }
 
-/** Lineární fade na konci skladby (curve=tri). */
-export function computeTailFade(dur: number, fadeSec: number): number {
-  return Math.max(0, Math.min(fadeSec, dur * 0.35, dur - 0.25));
-}
+const LIVE_LIMITER = "alimiter=limit=0.95:attack=5:release=50:level=0";
 
 export function buildTailLinearFadeFilter(dur: number, fadeSec: number): string {
   const fade = computeTailFade(dur, fadeSec);
@@ -442,13 +464,13 @@ export function buildTailLinearFadeFilter(dur: number, fadeSec: number): string 
   }
   const st = Math.max(0, dur - fade).toFixed(3);
   const d = fade.toFixed(3);
-  return `[0:a]${DECODE_STEREO},afade=t=out:st=${st}:d=${d}:curve=tri[aout]`;
+  return `[0:a]${DECODE_STEREO},afade=t=out:st=${st}:d=${d}:curve=hsin[aout]`;
 }
 
 export function buildHeadLinearFadeFilter(fadeSec: number): string {
   const fade = Math.max(0.05, Math.min(fadeSec, 8));
   const d = fade.toFixed(3);
-  return `[0:a]${DECODE_STEREO},afade=t=in:st=0:d=${d}:curve=tri[aout]`;
+  return `[0:a]${DECODE_STEREO},afade=t=in:st=0:d=${d}:curve=hsin[aout]`;
 }
 
 export type MidsongPreviewTiming = {
@@ -507,17 +529,7 @@ export function buildMidsongPreviewFilterGraph(
 const DECODE_STEREO =
   "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo";
 
-/** Společný výpočet délky crossfade pro pár skladeb. */
-export function computePairFade(
-  durA: number,
-  durB: number,
-  fadeSec: number,
-): number {
-  return Math.max(
-    0,
-    Math.min(fadeSec, durA * 0.35, durB * 0.35, durA - 0.25, durB - 0.25),
-  );
-}
+export { computePairFade, computeTailFade, pairCrossfadeStartSec };
 
 export type TransitionPreviewTiming = {
   fade: number;
@@ -584,7 +596,88 @@ export function buildPairCrossfadeFilterGraph(
   return [
     `[0:a]${DECODE_STEREO}[aa]`,
     `[1:a]${DECODE_STEREO}[bb]`,
-    `[aa][bb]acrossfade=d=${d}:c1=${c1}:c2=${c2}[aout]`,
+    `[aa][bb]acrossfade=d=${d}:c1=${c1}:c2=${c2}[xf]`,
+    `[xf]${LIVE_LIMITER}[aout]`,
+  ].join(";");
+}
+
+/** Jeden ffmpeg průběh: skladba A → stinger → skladba B (bez mezer mezi segmenty). */
+export function buildMidsongPairFilterGraph(
+  durA: number,
+  durB: number,
+  midsongDur: number,
+  fadeSec: number,
+): string {
+  const fadeOut = computeTailFade(durA, fadeSec);
+  const fadeIn = Math.max(0.05, Math.min(fadeSec, durB * 0.35, durB - 0.25));
+  const midFade = Math.min(1.2, midsongDur * 0.25, fadeSec);
+  const stOut = Math.max(0, durA - fadeOut).toFixed(3);
+  const fdOut = fadeOut.toFixed(3);
+  const midOutSt = Math.max(0, midsongDur - midFade).toFixed(3);
+  const midFd = midFade.toFixed(3);
+  const fdIn = fadeIn.toFixed(3);
+
+  return [
+    `[0:a]${DECODE_STEREO},afade=t=out:st=${stOut}:d=${fdOut}:curve=hsin[a0]`,
+    `[1:a]${DECODE_STEREO},afade=t=in:st=0:d=${midFd}:curve=hsin,afade=t=out:st=${midOutSt}:d=${midFd}:curve=hsin[m0]`,
+    `[2:a]${DECODE_STEREO},afade=t=in:st=0:d=${fdIn}:curve=hsin[b0]`,
+    `[a0][m0][b0]concat=n=3:v=0:a=1[cat]`,
+    `[cat]${LIVE_LIMITER}[aout]`,
+  ].join(";");
+}
+
+/**
+ * Live přechod od startA: konec A → midsong → celá skladba B.
+ * (První část A už byla přehrána raw streamem.)
+ */
+export function buildMidsongLiveTransitionFilterGraph(
+  startA: number,
+  durA: number,
+  midsongDur: number,
+  fadeSec: number,
+): string {
+  const segmentA = Math.max(0.1, durA - startA);
+  const fadeOut = computeTailFade(segmentA, fadeSec);
+  const fadeOutSt = Math.max(0, segmentA - fadeOut).toFixed(3);
+  const fdOut = fadeOut.toFixed(3);
+  const midFade = Math.min(1.2, midsongDur * 0.25, fadeSec);
+  const midFd = midFade.toFixed(3);
+  const midOutSt = Math.max(0, midsongDur - midFade).toFixed(3);
+  const fdIn = Math.max(0.05, Math.min(fadeSec, fadeSec)).toFixed(3);
+  const start = Math.max(0, startA).toFixed(3);
+
+  return [
+    `[0:a]${DECODE_STEREO},atrim=start=${start},asetpts=PTS-STARTPTS,afade=t=out:st=${fadeOutSt}:d=${fdOut}:curve=hsin[a0]`,
+    `[1:a]${DECODE_STEREO},afade=t=in:st=0:d=${midFd}:curve=hsin,afade=t=out:st=${midOutSt}:d=${midFd}:curve=hsin[m0]`,
+    `[2:a]${DECODE_STEREO},afade=t=in:st=0:d=${fdIn}:curve=hsin[b0]`,
+    `[a0][m0][b0]concat=n=3:v=0:a=1[cat]`,
+    `[cat]${LIVE_LIMITER}[aout]`,
+  ].join(";");
+}
+
+/** Crossfade od startA — první část A už hraje z raw streamu. */
+export function buildCrossfadeFromFilterGraph(
+  startA: number,
+  durA: number,
+  durB: number,
+  fadeSec: number,
+  settings = getAudioProcessSettings(),
+): string {
+  const tailA = Math.max(0.1, durA - startA);
+  const fade = computePairFade(tailA, durB, fadeSec);
+  const d = fade.toFixed(3);
+  const { c1, c2 } = resolveCrossfadeCurves(settings);
+  const start = Math.max(0, startA).toFixed(3);
+
+  if (fade <= 0.05) {
+    return `[1:a]${DECODE_STEREO}[aout]`;
+  }
+
+  return [
+    `[0:a]${DECODE_STEREO},atrim=start=${start},asetpts=PTS-STARTPTS[aa]`,
+    `[1:a]${DECODE_STEREO}[bb]`,
+    `[aa][bb]acrossfade=d=${d}:c1=${c1}:c2=${c2}[xf]`,
+    `[xf]${LIVE_LIMITER}[aout]`,
   ].join(";");
 }
 
@@ -609,16 +702,6 @@ export function buildTransitionPreviewFilterGraph(
     `[1:a]${DECODE_STEREO}[bb]`,
     `[aa][bb]acrossfade=d=${d}:c1=${c1}:c2=${c2}[aout]`,
   ].join(";");
-}
-
-/** Sekunda od začátku páru, kdy začne crossfade (pro UI metadata). */
-export function pairCrossfadeStartSec(
-  durA: number,
-  durB: number,
-  fadeSec: number,
-): number {
-  const fade = computePairFade(durA, durB, fadeSec);
-  return Math.max(0, durA - fade);
 }
 
 /** @deprecated — plný enhance chain; pro crossfade už stačí pre-render. */
@@ -700,11 +783,7 @@ export async function masterTrackFile(
     "-vn",
     "-af",
     buildEnhanceFilter(settings),
-    "-acodec",
-    "libmp3lame",
-    "-q:a",
-    "2",
-    tempPath,
+    ...mp3EncodeArgs(undefined, tempPath),
   );
 
   await execFileAsync(ffmpeg, args, { timeout: 600_000 });

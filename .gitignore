@@ -43,3 +43,6 @@ next-env.d.ts
 # downloaded audio
 /downloads
 
+# icecast runtime logs
+/config/logs/
+/config/*.log

@@ -8,7 +8,6 @@ import {
   parseSpotifyUrl,
   PLAYLIST_IMPORT_LIMIT,
 } from "@/lib/spotify";
-import { importSpotifyTrack, publicTrackPayload } from "@/lib/ytdlp";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -42,10 +41,17 @@ export async function POST(request: Request) {
   try {
     if (parsed.kind === "track") {
       const meta = await fetchSpotifyTrackMeta(url);
-      const track = await importSpotifyTrack(meta);
+      const job = await createPlaylistJob({
+        title: `${meta.artist} — ${meta.title}`,
+        tracks: [meta],
+        source: "track",
+      });
+      startPlaylistJob(job.id, [meta]);
+
       return NextResponse.json({
         type: "track",
-        track: publicTrackPayload(track),
+        jobId: job.id,
+        job,
       });
     }
 

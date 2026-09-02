@@ -210,6 +210,14 @@ export async function getTrack(uuid: string): Promise<LibraryTrack | null> {
 export function toPublicTrack(track: LibraryTrack) {
   return {
     ...track,
+    sourceUrl: null,
+    downloadUrl: null,
+  };
+}
+
+export function toStudioTrack(track: LibraryTrack) {
+  return {
+    ...track,
     downloadUrl:
       track.status === "ready" && track.audioFile
         ? `/api/audio/${track.uuid}`

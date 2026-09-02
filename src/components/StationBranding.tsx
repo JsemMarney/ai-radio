@@ -2,15 +2,15 @@
 
 import { useEffect, useState } from "react";
 import type { StationConfig } from "@/lib/types";
-import { OnAirLamp, StationHeader } from "@/components/player/BroadcastUi";
+import { LiveBadge, StationHeader } from "@/components/player/BroadcastUi";
 
 export function StationBranding({
   showTagline = true,
-  size = "md",
+  compact = false,
   config: configProp,
 }: {
   showTagline?: boolean;
-  size?: "sm" | "md" | "lg";
+  compact?: boolean;
   config?: StationConfig;
 }) {
   const [fetched, setFetched] = useState<StationConfig | null>(null);
@@ -36,13 +36,20 @@ export function StationBranding({
       colorBgPanel: "#171f1b",
     };
 
-  if (!showTagline) {
-    return <StationHeader config={{ ...config, tagline: "" }} size={size} />;
-  }
-
-  return <StationHeader config={config} size={size} />;
+  return (
+    <StationHeader
+      config={showTagline ? config : { ...config, tagline: "" }}
+      compact={compact}
+    />
+  );
 }
 
-export function OnAirBadge({ live }: { live: boolean }) {
-  return <OnAirLamp live={live} />;
+export function OnAirBadge({
+  live,
+  listeners = 0,
+}: {
+  live: boolean;
+  listeners?: number;
+}) {
+  return <LiveBadge live={live} listeners={listeners} />;
 }

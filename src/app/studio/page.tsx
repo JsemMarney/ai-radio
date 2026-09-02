@@ -22,6 +22,39 @@ function formatDuration(seconds: number | null): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function importJobStatusLabel(status: ImportJob["status"]): string {
+  switch (status) {
+    case "queued":
+      return "Ve frontě";
+    case "running":
+      return "Probíhá";
+    case "done":
+      return "Hotovo";
+    case "failed":
+      return "Selhalo";
+    default:
+      return status;
+  }
+}
+
+function importItemStatusLabel(item: ImportJob["items"][number]): string {
+  if (item.detail) return item.detail;
+  switch (item.status) {
+    case "pending":
+      return "Čeká";
+    case "downloading":
+      return "Stahuje se…";
+    case "ready":
+      return "Hotovo";
+    case "failed":
+      return "Selhalo";
+    case "skipped":
+      return "Přeskočeno";
+    default:
+      return item.status;
+  }
+}
+
 export default function StudioPage() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -113,7 +146,7 @@ export default function StudioPage() {
       } catch {
         // ignore
       }
-    }, 1500);
+    }, 800);
 
     return () => clearInterval(timer);
   }, [job, loadLibrary]);
@@ -159,9 +192,7 @@ export default function StudioPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Import selhal.");
 
-      if (data.type === "track") {
-        await loadLibrary();
-      } else if (data.type === "playlist" || data.type === "album") {
+      if (data.job) {
         setJob(data.job as ImportJob);
       }
       setUrl("");
@@ -542,15 +573,9 @@ export default function StudioPage() {
                 </li>
                 <li>yt-dlp: {health.tools.ytDlp ?? "—"}</li>
                 <li>
-                  Jingle:{" "}
-                  {health.jingle.configured
-                    ? `každých ${health.jingle.everyNTracks} skladeb`
-                    : "není nastaven"}
-                </li>
-                <li>
-                  Midsong:{" "}
+                  Stinger:{" "}
                   {health.midsong.configured
-                    ? `každých ${health.midsong.everyNTracks} přechodů · fade ${health.midsong.fadeSec}s · ${health.midsong.count} soubor(ů)`
+                    ? `náhodně ${health.midsong.minTracks}–${health.midsong.maxTracks} skladeb · fade ${health.midsong.fadeSec}s · ${health.midsong.count} soubor(ů)`
                     : "není nastaven"}
                 </li>
               </ul>
@@ -707,8 +732,20 @@ export default function StudioPage() {
             <div className="mt-4 rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/70 p-4">
               <p className="font-medium">{job.title}</p>
               <p className="text-sm text-[var(--ink-muted)]">
-                {jobProgress?.label} · {job.status}
+                {jobProgress?.label} · {importJobStatusLabel(job.status)}
               </p>
+              {(job.current || job.currentDetail) && job.status === "running" && (
+                <p className="mt-2 text-sm text-[var(--ink)]">
+                  {job.current && (
+                    <span className="font-medium">{job.current}</span>
+                  )}
+                  {job.currentDetail && (
+                    <span className="mt-0.5 block text-[var(--accent)]">
+                      {job.currentDetail}
+                    </span>
+                  )}
+                </p>
+              )}
               <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--bg-deep)]">
                 <div
                   className="h-full rounded-full bg-[var(--accent)] transition-all"
@@ -723,11 +760,14 @@ export default function StudioPage() {
                       className={
                         item.status === "failed"
                           ? "text-[var(--danger)]"
-                          : "text-[var(--ink-muted)]"
+                          : item.status === "downloading"
+                            ? "text-[var(--ink)]"
+                            : "text-[var(--ink-muted)]"
                       }
                     >
-                      {item.title} — {item.artist} ({item.status})
-                      {item.error ? `: ${item.error}` : ""}
+                      {item.title} — {item.artist}:{" "}
+                      {importItemStatusLabel(item)}
+                      {item.error ? ` (${item.error})` : ""}
                     </li>
                   ))}
                 </ul>

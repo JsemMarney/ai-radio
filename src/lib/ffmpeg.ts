@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -33,16 +34,60 @@ const FFMPEG_CANDIDATES = [
 
 let cachedFfmpeg: string | null | undefined;
 
+const FFMPEG_PROBE_TIMEOUT_MS = 3_000;
+
+function isFileCandidate(candidate: string): boolean {
+  return (
+    candidate.includes("/") ||
+    candidate.includes("\\") ||
+    candidate.toLowerCase().endsWith(".exe")
+  );
+}
+
+async function probeFfmpeg(candidate: string): Promise<boolean> {
+  try {
+    await execFileAsync(candidate, ["-version"], {
+      timeout: FFMPEG_PROBE_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveFfmpegFromPath(): Promise<string | null> {
+  if (process.platform !== "win32") return null;
+  try {
+    const { stdout } = await execFileAsync(
+      "where.exe",
+      ["ffmpeg"],
+      { timeout: 2_000 },
+    );
+    const first = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+    if (!first || !existsSync(first)) return null;
+    return (await probeFfmpeg(first)) ? first : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveFfmpeg(): Promise<string | null> {
   if (cachedFfmpeg !== undefined) return cachedFfmpeg;
 
+  const fromPath = await resolveFfmpegFromPath();
+  if (fromPath) {
+    cachedFfmpeg = fromPath;
+    return fromPath;
+  }
+
   for (const candidate of FFMPEG_CANDIDATES) {
-    try {
-      await execFileAsync(candidate, ["-version"], { timeout: 8000 });
+    if (isFileCandidate(candidate) && !existsSync(candidate)) continue;
+    if (await probeFfmpeg(candidate)) {
       cachedFfmpeg = candidate;
       return candidate;
-    } catch {
-      // try next
     }
   }
 
@@ -105,19 +150,28 @@ export function getRadioTransition(): "crossfade" | "cut" {
   return process.env.RADIO_TRANSITION === "cut" ? "cut" : "crossfade";
 }
 
+export function getStreamBitrate(): number {
+  const raw = Number(process.env.RADIO_STREAM_BITRATE ?? 256);
+  if (!Number.isFinite(raw)) return 256_000;
+  return Math.min(Math.max(Math.floor(raw), 128_000), 320_000);
+}
+
 export function mp3EncodeArgs(
   mapLabel?: string,
   outputPath = "pipe:1",
 ): string[] {
+  const bitrate = Math.floor(getStreamBitrate() / 1000);
   const args: string[] = [];
   if (mapLabel) args.push("-map", mapLabel);
   args.push(
     "-f", "mp3",
     "-c:a", "libmp3lame",
-    "-b:a", "192k",
-    "-minrate", "192k",
-    "-maxrate", "192k",
-    "-bufsize", "384k",
+    "-ar", "44100",
+    "-ac", "2",
+    "-b:a", `${bitrate}k`,
+    "-minrate", `${bitrate}k`,
+    "-maxrate", `${bitrate}k`,
+    "-bufsize", `${bitrate * 2}k`,
     "-write_xing", "0",
     outputPath,
   );

@@ -1,0 +1,63 @@
+<icecast>
+    <location>Miss Radio</location>
+    <admin>admin@localhost</admin>
+
+    <limits>
+        <clients>1000</clients>
+        <sources>4</sources>
+        <queue-size>524288</queue-size>
+        <client-timeout>30</client-timeout>
+        <header-timeout>15</header-timeout>
+        <source-timeout>10</source-timeout>
+        <burst-on-connect>1</burst-on-connect>
+        <burst-size>65535</burst-size>
+    </limits>
+
+    <authentication>
+        <source-password>hackme</source-password>
+        <relay-password>hackme</relay-password>
+        <admin-user>admin</admin-user>
+        <admin-password>hackme</admin-password>
+    </authentication>
+
+    <hostname>127.0.0.1</hostname>
+
+    <listen-socket>
+        <port>8000</port>
+        <bind-address>127.0.0.1</bind-address>
+    </listen-socket>
+
+    <mount type="normal">
+        <mount-name>/radio.mp3</mount-name>
+        <max-listeners>500</max-listeners>
+        <public>1</public>
+        <charset>UTF-8</charset>
+        <mp3-metadata-interval>16384</mp3-metadata-interval>
+        <burst-size>65536</burst-size>
+        <stream-name>Miss Radio</stream-name>
+        <stream-description>24/7 auto DJ</stream-description>
+        <stream-url>http://127.0.0.1:8787/player</stream-url>
+        <genre>Various</genre>
+    </mount>
+
+    <fileserve>1</fileserve>
+
+    <paths>
+        <basedir>./</basedir>
+        <logdir>./logs</logdir>
+        <webroot>./web</webroot>
+        <adminroot>./admin</adminroot>
+        <alias source="/" destination="/status.xsl"/>
+    </paths>
+
+    <logging>
+        <accesslog>access.log</accesslog>
+        <errorlog>error.log</errorlog>
+        <loglevel>3</loglevel>
+        <logsize>10000</logsize>
+    </logging>
+
+    <security>
+        <chroot>0</chroot>
+    </security>
+</icecast>

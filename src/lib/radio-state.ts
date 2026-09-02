@@ -2,15 +2,9 @@ import { open, readFile, rename, stat, unlink, writeFile } from "node:fs/promise
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { ensureDownloadsDir, getDownloadsDir } from "@/lib/library";
+import type { RadioNowPlaying } from "@/lib/types";
 
-export type RadioNowPlaying = {
-  uuid: string;
-  title: string;
-  artist: string;
-  album: string | null;
-  year: string | null;
-  thumbnail: string | null;
-};
+export type { RadioNowPlaying };
 
 export type PersistedRadioState = {
   nowPlaying: RadioNowPlaying | null;
@@ -22,10 +16,15 @@ export type PersistedRadioState = {
   sessionId: string | null;
   playlistBag: string[];
   lastPlayedUuid: string | null;
+  listenerRequests?: string[];
   updatedAt: string;
 };
 
-const MAX_RECENT = 5;
+export function getMaxRecentTracks(): number {
+  const raw = Number(process.env.RADIO_HISTORY_SIZE ?? 15);
+  if (!Number.isFinite(raw) || raw < 1) return 15;
+  return Math.min(Math.floor(raw), 50);
+}
 
 function lockPath(): string {
   return path.join(getDownloadsDir(), ".radio-broadcast.lock");
@@ -44,7 +43,26 @@ function lockStaleMs(): number {
   return process.env.NODE_ENV === "development" ? 12_000 : 45_000;
 }
 
-type LockInfo = { pid: number; at: number };
+type LockInfo = { pid: number; bootAt: number; at: number };
+
+function getStreamPortFromEnv(): number {
+  const raw = process.env.RADIO_STREAM_PORT ?? "8788";
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 8788;
+}
+
+async function isBrokerResponsive(): Promise<boolean> {
+  const port = getStreamPortFromEnv();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(2_000),
+      cache: "no-store",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 function isPidAlive(pid: number): boolean {
   if (!Number.isFinite(pid) || pid <= 0) return false;
@@ -60,8 +78,11 @@ async function readLockInfo(): Promise<LockInfo | null> {
   try {
     const raw = await readFile(lockPath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<LockInfo>;
-    if (typeof parsed.pid !== "number" || typeof parsed.at !== "number") return null;
-    return { pid: parsed.pid, at: parsed.at };
+    if (typeof parsed.pid !== "number") return null;
+    const bootAt = typeof parsed.bootAt === "number" ? parsed.bootAt : 0;
+    const at = typeof parsed.at === "number" ? parsed.at : null;
+    if (at == null) return null;
+    return { pid: parsed.pid, bootAt, at };
   } catch {
     return null;
   }
@@ -76,6 +97,14 @@ async function isLockStale(): Promise<boolean> {
 
   if (info && !isPidAlive(info.pid)) return true;
   if (info && now - info.at > lockStaleMs()) return true;
+  if (info && isPidAlive(info.pid)) {
+    const bootTime =
+      info.bootAt > 0
+        ? info.bootAt
+        : fileStat?.birthtimeMs ?? fileStat?.mtimeMs ?? now;
+    const bootAge = now - bootTime;
+    if (bootAge > 8_000 && !(await isBrokerResponsive())) return true;
+  }
   if (fileStat && now - fileStat.mtimeMs > lockStaleMs()) return true;
 
   return false;
@@ -130,6 +159,7 @@ const DEFAULT_STATE = (): PersistedRadioState => ({
   sessionId: null,
   playlistBag: [],
   lastPlayedUuid: null,
+  listenerRequests: [],
   updatedAt: new Date().toISOString(),
 });
 
@@ -148,6 +178,7 @@ export async function readRadioState(): Promise<PersistedRadioState> {
         sessionId: parsed.sessionId ?? null,
         playlistBag: parsed.playlistBag ?? [],
         lastPlayedUuid: parsed.lastPlayedUuid ?? null,
+        listenerRequests: parsed.listenerRequests ?? [],
       };
     } catch {
       if (attempt < 2) await new Promise((r) => setTimeout(r, 25));
@@ -164,8 +195,9 @@ export async function tryAcquireBroadcastLock(): Promise<boolean> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const fh = await open(p, "wx");
+      const stamp = Date.now();
       await fh.writeFile(
-        JSON.stringify({ pid: process.pid, at: Date.now() }),
+        JSON.stringify({ pid: process.pid, bootAt: stamp, at: stamp }),
         "utf8",
       );
       await fh.close();
@@ -185,9 +217,15 @@ export async function tryAcquireBroadcastLock(): Promise<boolean> {
 
 export async function refreshBroadcastLock(): Promise<void> {
   if (!existsSync(lockPath())) return;
+  const info = await readLockInfo();
+  const stamp = Date.now();
   await writeFile(
     lockPath(),
-    JSON.stringify({ pid: process.pid, at: Date.now() }),
+    JSON.stringify({
+      pid: process.pid,
+      bootAt: info?.bootAt ?? stamp,
+      at: stamp,
+    }),
     "utf8",
   );
 }
@@ -225,6 +263,11 @@ export async function writePlaylistState(
 ): Promise<void> {
   const existing = await readRadioState();
   await writeState({ ...existing, playlistBag, lastPlayedUuid });
+}
+
+export async function writeListenerRequestQueue(uuids: string[]): Promise<void> {
+  const existing = await readRadioState();
+  await writeState({ ...existing, listenerRequests: uuids });
 }
 
 export async function writeRadioState(
@@ -291,7 +334,7 @@ export async function updateNowPlaying(
       recentlyPlayed = [
         prev,
         ...recentlyPlayed.filter((t) => t.uuid !== prev.uuid),
-      ].slice(0, MAX_RECENT);
+      ].slice(0, getMaxRecentTracks());
     }
   }
 
@@ -318,6 +361,6 @@ export async function pushRecentlyPlayed(track: RadioNowPlaying): Promise<void> 
 
   await writeState({
     ...existing,
-    recentlyPlayed: recent.slice(0, MAX_RECENT),
+    recentlyPlayed: recent.slice(0, getMaxRecentTracks()),
   });
 }

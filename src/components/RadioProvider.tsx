@@ -9,8 +9,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { RadioNowPlaying, QueuePreview } from "@/lib/types";
-import { getDirectStreamUrl } from "@/lib/types";
+import type {
+  PlaybackSegment,
+  QueuePreview,
+  RadioNowPlaying,
+  ScheduledTrack,
+} from "@/lib/types";
+import { buildProgramSchedule, pickNextScheduleTrack, sliceScheduleForDisplay } from "@/lib/program-schedule";
+import { STREAM_URL } from "@/lib/types";
 
 function recentKey(tracks: RadioNowPlaying[]): string {
   return tracks.map((t) => t.uuid).join("|");
@@ -18,6 +24,43 @@ function recentKey(tracks: RadioNowPlaying[]): string {
 
 const VOLUME_KEY = "ai-radio-volume";
 const DEFAULT_VOLUME = 0.85;
+
+let cachedStreamUrl = "";
+let cachedStreamExpiresAt = 0;
+
+function withStreamCacheBust(url: string): string {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}_=${Date.now()}`;
+}
+
+async function resolveStreamUrl(): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedStreamUrl && cachedStreamExpiresAt > now + 120) {
+    return cachedStreamUrl;
+  }
+
+  try {
+    const res = await fetch("/api/radio/stream-url", { cache: "no-store" });
+    if (!res.ok) return STREAM_URL;
+    const data = (await res.json()) as {
+      url?: string;
+      expiresAt?: number | null;
+      signed?: boolean;
+    };
+    if (data.url) {
+      cachedStreamUrl = data.url;
+      cachedStreamExpiresAt =
+        data.signed && data.expiresAt ? data.expiresAt : now + 86400;
+      return cachedStreamUrl;
+    }
+  } catch {
+    // fallback na přímý proxy stream
+  }
+
+  cachedStreamUrl = STREAM_URL;
+  cachedStreamExpiresAt = now + 86400;
+  return STREAM_URL;
+}
 
 function readStoredVolume(): number {
   if (typeof window === "undefined") return DEFAULT_VOLUME;
@@ -39,7 +82,12 @@ type RadioContextValue = {
   stationOnline: boolean;
   queueRemaining: number;
   upcoming: RadioNowPlaying[];
+  schedule: ScheduledTrack[];
+  nextUp: ScheduledTrack | null;
+  segment: PlaybackSegment;
+  crossfadeSec: number;
   streamUrl: string;
+  shareUrl: string;
   connection: ConnectionState;
   error: string | null;
   statusReady: boolean;
@@ -61,6 +109,17 @@ type StatusPayload = {
   broadcasting?: boolean;
   queueRemaining?: number;
   sessionId?: string | null;
+  upcoming?: RadioNowPlaying[];
+  schedule?: ScheduledTrack[];
+  nextUp?: ScheduledTrack | null;
+  segment?: PlaybackSegment;
+  crossfadeSec?: number;
+  streamEpoch?: number;
+  songsUntilMidsong?: number;
+  midsongDurationSec?: number;
+  midsongConfigured?: boolean;
+  midsongMinTracks?: number;
+  midsongMaxTracks?: number;
 };
 
 const CONNECTION_DEBOUNCE_MS = 800;
@@ -70,6 +129,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const recentKeyRef = useRef("");
   const trackUuidRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const streamEpochRef = useRef(0);
   const [statusReady, setStatusReady] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<RadioNowPlaying | null>(null);
@@ -80,7 +140,17 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const [stationOnline, setStationOnline] = useState(false);
   const [queueRemaining, setQueueRemaining] = useState(0);
   const [upcoming, setUpcoming] = useState<RadioNowPlaying[]>([]);
+  const [schedule, setSchedule] = useState<ScheduledTrack[]>([]);
+  const [nextUp, setNextUp] = useState<ScheduledTrack | null>(null);
+  const [segment, setSegment] = useState<PlaybackSegment>("song");
+  const [crossfadeSec, setCrossfadeSec] = useState(6);
+  const [songsUntilMidsong, setSongsUntilMidsong] = useState(4);
+  const [midsongDurationSec, setMidsongDurationSec] = useState(6);
+  const [midsongConfigured, setMidsongConfigured] = useState(false);
+  const [midsongMinTracks, setMidsongMinTracks] = useState(3);
+  const [midsongMaxTracks, setMidsongMaxTracks] = useState(6);
   const [streamUrl, setStreamUrl] = useState("");
+  const [shareUrl, setShareUrl] = useState("");
   const [connection, setConnection] = useState<ConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [volume, setVolumeState] = useState(DEFAULT_VOLUME);
@@ -111,6 +181,21 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const applyStatus = useCallback((data: StatusPayload) => {
+    if (data.streamEpoch !== undefined && data.streamEpoch !== streamEpochRef.current) {
+      const hadEpoch = streamEpochRef.current > 0;
+      streamEpochRef.current = data.streamEpoch;
+      if (hadEpoch) {
+        const el = audioRef.current;
+        if (el && !el.paused) {
+          void resolveStreamUrl().then((url) => {
+            el.src = withStreamCacheBust(url);
+            el.load();
+            void el.play().catch(() => {});
+          });
+        }
+      }
+    }
+
     if (data.sessionId !== undefined && data.sessionId !== sessionIdRef.current) {
       const hadSession = sessionIdRef.current !== null;
       sessionIdRef.current = data.sessionId;
@@ -118,10 +203,11 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         setError("Stanice restartovala — připojuji znovu…");
         const el = audioRef.current;
         if (el && !el.paused) {
-          el.pause();
-          el.src = getDirectStreamUrl();
-          el.load();
-          void el.play().catch(() => {});
+          void resolveStreamUrl().then((url) => {
+            el.src = url;
+            el.load();
+            void el.play().catch(() => {});
+          });
         }
       }
     } else if (data.sessionId !== undefined) {
@@ -152,12 +238,35 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     if (data.listeners !== undefined) setListeners(data.listeners);
     if (data.broadcasting !== undefined) setBroadcasting(data.broadcasting);
     if (data.queueRemaining !== undefined) setQueueRemaining(data.queueRemaining);
+    if (data.upcoming !== undefined) setUpcoming(data.upcoming);
+    if (data.segment !== undefined) setSegment(data.segment);
+    if (data.crossfadeSec !== undefined) setCrossfadeSec(data.crossfadeSec);
+    if (data.songsUntilMidsong !== undefined) {
+      setSongsUntilMidsong(data.songsUntilMidsong);
+    }
+    if (data.midsongDurationSec !== undefined) {
+      setMidsongDurationSec(data.midsongDurationSec);
+    }
+    if (data.midsongConfigured !== undefined) {
+      setMidsongConfigured(data.midsongConfigured);
+    }
+    if (data.midsongMinTracks !== undefined) {
+      setMidsongMinTracks(data.midsongMinTracks);
+    }
+    if (data.midsongMaxTracks !== undefined) {
+      setMidsongMaxTracks(data.midsongMaxTracks);
+    }
   }, []);
 
   useEffect(() => {
-    const direct = getDirectStreamUrl();
-    setStreamUrl(direct);
     setVolumeState(readStoredVolume());
+    if (typeof window !== "undefined") {
+      setShareUrl(`${window.location.origin}/player`);
+    }
+
+    void resolveStreamUrl().then((url) => {
+      setStreamUrl(url);
+    });
 
     void fetch("/api/radio/status", { cache: "no-store" })
       .then((r) => r.json())
@@ -171,55 +280,74 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!statusReady) return;
     void loadQueue();
-    const timer = setInterval(() => void loadQueue(), 10_000);
+    const pollMs = playing ? 4_000 : 8_000;
+    const timer = setInterval(() => void loadQueue(), pollMs);
     return () => clearInterval(timer);
-  }, [statusReady, loadQueue, nowPlaying?.uuid]);
+  }, [statusReady, loadQueue, nowPlaying?.uuid, playing]);
+
+  useEffect(() => {
+    const recompute = () => {
+      const live = buildProgramSchedule({
+        nowPlaying,
+        trackStartedAt,
+        upcoming,
+        crossfadeSec,
+        songsUntilMidsong,
+        stingerEveryAvg: (midsongMinTracks + midsongMaxTracks) / 2,
+        stingerSec: midsongDurationSec,
+        showStingers: midsongConfigured,
+        stingerLabel: "Midsong",
+      });
+      setSchedule(sliceScheduleForDisplay(live, 5));
+      setNextUp(pickNextScheduleTrack(live));
+    };
+
+    recompute();
+    const timer = setInterval(recompute, 1_000);
+    return () => clearInterval(timer);
+  }, [
+    nowPlaying,
+    trackStartedAt,
+    upcoming,
+    crossfadeSec,
+    songsUntilMidsong,
+    midsongDurationSec,
+    midsongConfigured,
+    midsongMinTracks,
+    midsongMaxTracks,
+  ]);
 
   useEffect(() => {
     let es: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let closed = false;
-    let attempt = 0;
 
-    function connect() {
-      if (closed) return;
+    const connect = () => {
       es?.close();
       es = new EventSource("/api/radio/events");
 
       es.onopen = () => {
-        attempt = 0;
         setStationOnline(true);
+        setError(null);
       };
 
       es.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data) as StatusPayload & { offline?: boolean };
-          if (data.offline) {
-            setStationOnline(false);
-            return;
-          }
-          setStationOnline(true);
-          applyStatus(data);
+          applyStatus(JSON.parse(event.data) as StatusPayload);
         } catch {
-          // ignore
+          // ignore malformed
         }
       };
 
       es.onerror = () => {
+        setStationOnline(false);
         es?.close();
         es = null;
-        setStationOnline(false);
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-        attempt += 1;
-        const waitMs = Math.min(30_000, 2000 * Math.min(attempt, 5));
-        reconnectTimer = setTimeout(connect, waitMs);
+        reconnectTimer = setTimeout(connect, 4000);
       };
-    }
+    };
 
     connect();
-
     return () => {
-      closed = true;
       es?.close();
       if (reconnectTimer) clearTimeout(reconnectTimer);
     };
@@ -228,15 +356,9 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
-    el.volume = volume;
-  }, [volume]);
 
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let connectionTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let retryAttempt = 0;
 
     const setConnectionSoon = (state: ConnectionState) => {
@@ -256,9 +378,11 @@ export function RadioProvider({ children }: { children: ReactNode }) {
       retryTimer = setTimeout(() => {
         retryTimer = null;
         if (el.paused) return;
-        el.src = getDirectStreamUrl();
-        el.load();
-        void el.play().catch(() => scheduleRetry());
+        void resolveStreamUrl().then((url) => {
+          el.src = withStreamCacheBust(url);
+          el.load();
+          void el.play().catch(() => scheduleRetry());
+        });
       }, delay);
     };
 
@@ -314,22 +438,26 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const connectStream = useCallback(() => {
+  const connectStream = useCallback(async () => {
     const el = audioRef.current;
     if (!el) return false;
     setConnection("connecting");
-    // Bez cache-bust — jeden kontinuální live mount (jako Icecast)
-    el.src = getDirectStreamUrl();
+    const url = await resolveStreamUrl();
+    setStreamUrl(url);
+    el.src = url;
     el.load();
     return true;
   }, []);
 
   const play = useCallback(() => {
     const el = audioRef.current;
-    if (!el || !connectStream()) return;
-    void el.play().catch(() => {
-      setError("Přehrávání zablokováno prohlížečem. Klikni znovu.");
-      setConnection("idle");
+    if (!el) return;
+    void connectStream().then((ok) => {
+      if (!ok) return;
+      void el.play().catch(() => {
+        setError("Přehrávání zablokováno prohlížečem. Klikni znovu.");
+        setConnection("idle");
+      });
     });
   }, [connectStream]);
 
@@ -353,11 +481,16 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     setError(null);
     setConnection("reconnecting");
     el.pause();
-    el.src = getDirectStreamUrl();
-    el.load();
-    void el.play().catch(() => {
-      setError("Broadcaster neběží. Spusť start.bat.");
-      setConnection("offline");
+    cachedStreamExpiresAt = 0;
+    void resolveStreamUrl().then((url) => {
+      cachedStreamExpiresAt = 0;
+      setStreamUrl(url);
+      el.src = withStreamCacheBust(url);
+      el.load();
+      void el.play().catch(() => {
+        setError("Broadcaster neběží. Spusť start.bat.");
+        setConnection("offline");
+      });
     });
   }, []);
 
@@ -373,12 +506,17 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         stationOnline,
         queueRemaining,
         upcoming,
+        schedule,
+        nextUp,
+        segment,
+        crossfadeSec,
         streamUrl,
+        shareUrl,
         connection,
         error,
+        statusReady,
         volume,
         setVolume,
-        statusReady,
         play,
         pause,
         toggle,
@@ -386,19 +524,15 @@ export function RadioProvider({ children }: { children: ReactNode }) {
       }}
     >
       {children}
-      <audio
-        ref={audioRef}
-        className="sr-only"
-        preload="none"
-        playsInline
-        controlsList="nodownload noplaybackrate noremoteplayback"
-      />
+      <audio ref={audioRef} preload="none" />
     </RadioContext.Provider>
   );
 }
 
 export function useRadio(): RadioContextValue {
   const ctx = useContext(RadioContext);
-  if (!ctx) throw new Error("useRadio must be used within RadioProvider");
+  if (!ctx) {
+    throw new Error("useRadio must be used within RadioProvider");
+  }
   return ctx;
 }

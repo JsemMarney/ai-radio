@@ -51,11 +51,10 @@ export function TrackTimeline({
 
   if (!active || !trackStartedAt || !durationSec || durationSec <= 0) {
     return (
-      <div className="mt-3">
-        <div className="h-1.5 overflow-hidden rounded-full bg-[var(--bg-deep)]">
-          <div className="h-full w-0 bg-[var(--accent)]/40" />
+      <div>
+        <div className="h-1 overflow-hidden rounded-full bg-[var(--bg-elevated)]">
+          <div className="h-full w-0 bg-[var(--accent)]/30" />
         </div>
-        <p className="mt-1.5 text-xs text-[var(--ink-muted)]">— / —</p>
       </div>
     );
   }
@@ -65,17 +64,14 @@ export function TrackTimeline({
   const pct = Math.min(100, (played / durationSec) * 100);
 
   return (
-    <div className="mt-3">
-      <div className="h-1.5 overflow-hidden rounded-full bg-[var(--bg-deep)]">
+    <div>
+      <div className="h-1 overflow-hidden rounded-full bg-[var(--bg-elevated)]">
         <div
           className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-500 ease-linear"
-          style={{
-            width: `${pct}%`,
-            boxShadow: pct > 0 ? "0 0 8px var(--glow-accent)" : undefined,
-          }}
+          style={{ width: `${pct}%` }}
         />
       </div>
-      <div className="mt-1.5 flex justify-between font-[family-name:var(--font-mono)] text-[10px] text-[var(--ink-muted)]">
+      <div className="mt-2 flex justify-between text-xs tabular-nums text-[var(--ink-muted)]">
         <span>
           {formatClock(played)} / {formatClock(durationSec)}
         </span>

@@ -2,36 +2,29 @@ import type { StationConfig } from "@/lib/types";
 
 export function StationHeader({
   config,
-  size = "md",
+  compact = false,
 }: {
   config: StationConfig;
-  size?: "sm" | "md" | "lg";
+  compact?: boolean;
 }) {
-  const logoSize =
-    size === "lg" ? "h-14 w-14" : size === "sm" ? "h-8 w-8" : "h-11 w-11";
-  const titleSize =
-    size === "lg"
-      ? "text-4xl tracking-[0.12em]"
-      : size === "sm"
-        ? "text-xl tracking-[0.08em]"
-        : "text-3xl tracking-[0.1em]";
-
   return (
-    <div className="flex flex-col items-center gap-3 text-center">
+    <div className={`flex items-center gap-3 ${compact ? "" : "flex-col text-center sm:flex-row sm:text-left"}`}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={config.logoUrl}
         alt=""
-        className={`${logoSize} drop-shadow-[0_0_12px_var(--glow-accent)]`}
+        className={`${compact ? "h-9 w-9" : "h-11 w-11"} shrink-0 rounded-full ring-1 ring-[var(--line-strong)]`}
       />
-      <div>
+      <div className="min-w-0">
         <h1
-          className={`font-[family-name:var(--font-display)] ${titleSize} uppercase text-[var(--ink)]`}
+          className={`truncate font-[family-name:var(--font-display)] font-semibold tracking-tight text-[var(--ink)] ${
+            compact ? "text-lg" : "text-2xl sm:text-3xl"
+          }`}
         >
           {config.name}
         </h1>
-        {config.tagline ? (
-          <p className="mt-1.5 font-[family-name:var(--font-mono)] text-xs tracking-wide text-[var(--ink-muted)]">
+        {config.tagline && !compact ? (
+          <p className="mt-0.5 truncate text-sm text-[var(--ink-muted)]">
             {config.tagline}
           </p>
         ) : null}
@@ -40,83 +33,120 @@ export function StationHeader({
   );
 }
 
-export function OnAirLamp({ live }: { live: boolean }) {
-  if (!live) {
-    return (
-      <span className="inline-flex items-center gap-2 font-[family-name:var(--font-mono)] text-[10px] tracking-widest text-[var(--ink-muted)] uppercase">
-        <span className="h-2.5 w-2.5 rounded-sm border border-[var(--line)] bg-[var(--bg-panel)]" />
-        Off air
-      </span>
-    );
-  }
-
+export function LiveBadge({
+  live,
+  listeners,
+}: {
+  live: boolean;
+  listeners: number;
+}) {
   return (
-    <span className="inline-flex items-center gap-2.5 font-[family-name:var(--font-mono)] text-[10px] font-medium tracking-widest text-[var(--danger)] uppercase">
-      <span className="on-air-lamp h-3 w-3 rounded-sm bg-[var(--danger)]" />
-      On air
-    </span>
+    <div className="flex items-center gap-3">
+      <span
+        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+          live
+            ? "bg-[var(--danger)]/12 text-[var(--danger)]"
+            : "bg-[var(--bg-elevated)] text-[var(--ink-muted)]"
+        }`}
+      >
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${live ? "live-dot bg-[var(--danger)]" : "bg-[var(--ink-muted)]/40"}`}
+        />
+        {live ? "Živě" : "Offline"}
+      </span>
+      {live ? (
+        <span className="text-xs text-[var(--ink-muted)]">
+          {listeners}{" "}
+          {listeners === 1 ? "posluchač" : listeners < 5 ? "posluchači" : "posluchačů"}
+        </span>
+      ) : null}
+    </div>
   );
 }
 
-export function VuMeter({ active }: { active: boolean }) {
+export function WaveBars({ active }: { active: boolean }) {
   return (
     <div
-      className={`flex h-full items-end justify-center gap-[3px] px-1 ${active ? "" : "vu-idle"}`}
+      className={`flex h-8 items-end justify-center gap-[3px] ${active ? "" : "wave-idle"}`}
       aria-hidden
     >
-      {[0.6, 0.85, 1, 0.7, 0.5].map((h, i) => (
+      {[0.45, 0.75, 1, 0.65, 0.55, 0.85, 0.4].map((h, i) => (
         <span
           key={i}
-          className="vu-bar w-[4px] rounded-sm bg-[var(--accent)]"
-          style={{ height: `${h * 100}%`, opacity: 0.5 + h * 0.4 }}
+          className="wave-bar w-[3px] rounded-full bg-[var(--accent)]"
+          style={{ height: `${h * 100}%` }}
         />
       ))}
     </div>
   );
 }
 
-export function BroadcastMonitor({
+export function NowPlayingHero({
   thumbnail,
   title,
+  artist,
+  album,
+  year,
   playing,
 }: {
   thumbnail: string | null;
   title: string;
+  artist: string;
+  album?: string | null;
+  year?: string | null;
   playing: boolean;
 }) {
   return (
-    <div className="broadcast-monitor rounded-xl p-2">
-      <div className="broadcast-monitor-bezel flex gap-2 rounded-lg p-2">
-        <div className="hidden w-5 sm:block">
-          <VuMeter active={playing} />
+    <div className="now-playing-hero relative overflow-hidden rounded-2xl">
+      {thumbnail ? (
+        <>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={thumbnail}
+            alt=""
+            className="hero-bg absolute inset-0 h-full w-full scale-110 object-cover blur-2xl brightness-[0.35] saturate-150"
+            aria-hidden
+          />
+          <div className="hero-overlay absolute inset-0 bg-gradient-to-t from-[var(--bg-deep)] via-[var(--bg-deep)]/70 to-[var(--bg-deep)]/30" />
+        </>
+      ) : (
+        <div className="hero-overlay absolute inset-0 bg-[var(--bg-panel)]" />
+      )}
+
+      <div className="relative flex flex-col items-center gap-5 px-6 py-8 sm:flex-row sm:items-end sm:gap-6 sm:py-10">
+        <div className="relative shrink-0">
+          <div className="album-art-shadow overflow-hidden rounded-xl ring-1 ring-white/10">
+            {thumbnail ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={thumbnail}
+                alt={title}
+                className="h-44 w-44 object-cover sm:h-48 sm:w-48"
+              />
+            ) : (
+              <div className="flex h-44 w-44 items-center justify-center bg-[var(--bg-elevated)] sm:h-48 sm:w-48">
+                <span className="text-4xl text-[var(--ink-muted)]/30">♪</span>
+              </div>
+            )}
+          </div>
         </div>
-        <div className="relative aspect-square min-w-0 flex-1 overflow-hidden rounded-md bg-[var(--bg-deep)]">
-          {thumbnail ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={thumbnail}
-              alt={title}
-              className="h-full w-full object-cover"
-            />
-          ) : (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--ink-muted)]">
-              <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--accent)]" />
-              <span className="font-[family-name:var(--font-mono)] text-[10px]">
-                SIGNAL
-              </span>
-            </div>
-          )}
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-black/50 to-transparent" />
+
+        <div className="min-w-0 flex-1 text-center sm:pb-1 sm:text-left">
+          <div className="mb-3 flex justify-center sm:justify-start">
+            <WaveBars active={playing} />
+          </div>
+          <p className="text-xs font-medium text-[var(--accent-soft)]">Právě hraje</p>
+          <h2 className="mt-1 line-clamp-2 font-[family-name:var(--font-display)] text-2xl font-semibold leading-tight text-[var(--ink)] sm:text-3xl">
+            {title}
+          </h2>
+          <p className="mt-1 truncate text-base text-[var(--ink-muted)]">{artist}</p>
+          {album ? (
+            <p className="mt-1 truncate text-sm text-[var(--ink-muted)]/80">
+              {year ? `${year} · ` : ""}
+              {album}
+            </p>
+          ) : null}
         </div>
-        <div className="hidden w-5 sm:block">
-          <VuMeter active={playing} />
-        </div>
-      </div>
-      <div className="mt-1.5 flex items-center justify-between px-1 font-[family-name:var(--font-mono)] text-[9px] tracking-wider text-[var(--ink-muted)] uppercase">
-        <span>Studio A</span>
-        <span className={playing ? "text-[var(--ok)]" : ""}>
-          {playing ? "● TX" : "○ STBY"}
-        </span>
       </div>
     </div>
   );
@@ -133,16 +163,16 @@ export function PlayControl({
     <button
       type="button"
       onClick={onToggle}
-      className="btn-play flex h-[4.5rem] w-[4.5rem] items-center justify-center rounded-full text-[var(--bg-deep)]"
+      className="btn-play flex h-16 w-16 items-center justify-center rounded-full text-[var(--bg-deep)] shadow-lg"
       aria-label={playing ? "Pauza" : "Přehrát"}
     >
       {playing ? (
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
           <rect x="6" y="5" width="4" height="14" rx="1" />
           <rect x="14" y="5" width="4" height="14" rx="1" />
         </svg>
       ) : (
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
           <path d="M8 5.5v13l11-6.5L8 5.5z" />
         </svg>
       )}
@@ -160,11 +190,11 @@ export function VolumeControl({
   onToggleMute: () => void;
 }) {
   return (
-    <div className="flex w-full max-w-xs items-center gap-3">
+    <div className="flex w-full max-w-sm items-center gap-3">
       <button
         type="button"
         onClick={onToggleMute}
-        className="flex h-8 w-8 items-center justify-center text-[var(--ink-muted)] transition hover:text-[var(--accent-soft)]"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition hover:bg-[var(--bg-elevated)] hover:text-[var(--ink)]"
         aria-label={volume > 0 ? "Ztlumit" : "Zapnout zvuk"}
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
@@ -192,7 +222,7 @@ export function VolumeControl({
         className="broadcast-range flex-1"
         aria-label="Hlasitost"
       />
-      <span className="w-9 text-right font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--ink-muted)]">
+      <span className="w-8 shrink-0 text-right text-xs tabular-nums text-[var(--ink-muted)]">
         {Math.round(volume * 100)}
       </span>
     </div>
@@ -212,38 +242,36 @@ export function ProgramLog({
 
   return (
     <section className="w-full">
-      <h2 className="mb-2 font-[family-name:var(--font-mono)] text-[10px] tracking-[0.2em] text-[var(--ink-muted)] uppercase">
-        {title}
-      </h2>
-      <ul className="overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--bg-panel)]/40">
+      <h2 className="mb-3 text-sm font-medium text-[var(--ink-muted)]">{title}</h2>
+      <ul className="space-y-1">
         {tracks.map((track, index) => (
           <li
             key={track.uuid}
-            className={`program-log-row flex items-center gap-3 border-b border-[var(--line)] px-3 py-2.5 last:border-b-0 ${
+            className={`program-log-row flex items-center gap-3 rounded-xl px-3 py-2.5 ${
               variant === "upcoming" && index === 0 ? "is-next" : ""
             } ${variant === "recent" ? "is-recent" : ""}`}
           >
-            <span className="w-5 shrink-0 font-[family-name:var(--font-mono)] text-[10px] text-[var(--ink-muted)]">
-              {variant === "upcoming" ? String(index + 1).padStart(2, "0") : "–"}
-            </span>
             {track.thumbnail ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={track.thumbnail}
                 alt=""
-                className="h-9 w-9 shrink-0 rounded object-cover"
+                className="h-10 w-10 shrink-0 rounded-lg object-cover"
               />
             ) : (
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded bg-[var(--bg-deep)] text-[10px] text-[var(--ink-muted)]">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--bg-elevated)] text-sm text-[var(--ink-muted)]">
                 ♪
               </span>
             )}
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm text-[var(--ink)]">{track.title}</p>
-              <p className="truncate font-[family-name:var(--font-mono)] text-[11px] text-[var(--ink-muted)]">
-                {track.artist}
-              </p>
+              <p className="truncate text-sm font-medium text-[var(--ink)]">{track.title}</p>
+              <p className="truncate text-xs text-[var(--ink-muted)]">{track.artist}</p>
             </div>
+            {variant === "upcoming" && index === 0 ? (
+              <span className="shrink-0 rounded-md bg-[var(--accent)]/15 px-2 py-0.5 text-[10px] font-medium text-[var(--accent-soft)]">
+                Další
+              </span>
+            ) : null}
           </li>
         ))}
       </ul>

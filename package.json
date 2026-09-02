@@ -5,7 +5,9 @@
   "scripts": {
     "dev:web": "next dev -H 127.0.0.1 -p 8787",
     "dev:radio": "tsx scripts/broadcaster.ts",
+    "dev:icecast": "tsx scripts/icecast.ts",
     "dev": "concurrently -n web,radio -c blue,magenta \"npm run dev:web\" \"npm run dev:radio\"",
+    "dev:all": "concurrently -n web,radio,icecast -c blue,magenta,cyan \"npm run dev:web\" \"npm run dev:radio\" \"npm run dev:icecast\"",
     "build": "next build",
     "start:web": "next start -H 127.0.0.1 -p 8787",
     "start:radio": "tsx scripts/broadcaster.ts",

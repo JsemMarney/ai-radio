@@ -1,4 +1,4 @@
-import { brokerFetch } from "@/lib/radio-broker";
+import { brokerFetch, brokerStream } from "@/lib/radio-broker";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,7 +35,7 @@ export async function GET() {
       let attempt = 0;
 
       while (!closed) {
-        const res = await brokerFetch("/events");
+        const res = await brokerStream("/events");
 
         if (res.ok && res.body) {
           attempt = 0;

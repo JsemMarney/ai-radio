@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-/** Načte .env.local a .env do process.env (pro standalone broadcaster). */
+/** Načte .env a .env.local — pozdější hodnota stejného klíče přepíše dřívější. */
 export function loadEnvFiles(): void {
-  for (const name of [".env.local", ".env"]) {
+  for (const name of [".env", ".env.local"]) {
     const file = path.join(process.cwd(), name);
     if (!existsSync(file)) continue;
     for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
@@ -19,7 +19,7 @@ export function loadEnvFiles(): void {
       ) {
         val = val.slice(1, -1);
       }
-      if (process.env[key] === undefined) process.env[key] = val;
+      process.env[key] = val;
     }
   }
 }

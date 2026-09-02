@@ -16,7 +16,7 @@ import {
   getTrackDir,
   readTrackInfo,
   resolveAudioPath,
-  toPublicTrack,
+  toStudioTrack,
   writeTrackInfo,
   type LibraryTrack,
 } from "@/lib/library";
@@ -368,9 +368,15 @@ export async function ensureTrackProcessed(uuid: string): Promise<string | null>
   return ensureBroadcastFile(uuid);
 }
 
+/** Průběh importu — volá se při hledání, stahování a zpracování. */
+export type ImportProgressCallback = (progress: {
+  detail: string;
+}) => void | Promise<void>;
+
 /** Download audio for a Spotify track meta into a UUID library folder. */
 export async function importSpotifyTrack(
   meta: SpotifyTrackMeta,
+  onProgress?: ImportProgressCallback,
 ): Promise<LibraryTrack> {
   const existing = await findBySpotifyId(meta.id);
   if (existing) return existing;
@@ -382,6 +388,7 @@ export async function importSpotifyTrack(
   await mkdir(trackDir, { recursive: true });
 
   try {
+    await onProgress?.({ detail: "Připravuji stažení…" });
     const ytdlp = await resolveYtDlp();
     const ffmpeg = await resolveFfmpeg();
     if (!ffmpeg) {
@@ -399,6 +406,7 @@ export async function importSpotifyTrack(
     queryLoop: for (const query of queries) {
       let hits: SearchHit[] = [];
       try {
+        await onProgress?.({ detail: `Hledám na YouTube: ${query}` });
         hits = await searchYouTube(ytdlp, ffmpeg, query, meta);
       } catch (error) {
         errors.push(`hledání „${query}“: ${shortError(error)}`);
@@ -414,6 +422,7 @@ export async function importSpotifyTrack(
         if (triedUrls.has(hit.url)) continue;
         triedUrls.add(hit.url);
         try {
+          await onProgress?.({ detail: `Stahuji: ${hit.title}` });
           info = await downloadFromSource(
             ytdlp,
             ffmpeg,
@@ -452,6 +461,9 @@ export async function importSpotifyTrack(
       throw new Error("Stažení proběhlo, ale výsledný audio soubor se nenašel.");
     }
 
+    await onProgress?.({
+      detail: "Zpracovávám audio (konverze, normalizace)…",
+    });
     const { path: finalPath, trim } = await normalizeToTrackFile(
       filepath,
       trackDir,
@@ -497,7 +509,7 @@ export async function importSpotifyTrack(
 }
 
 export function publicTrackPayload(track: LibraryTrack) {
-  return toPublicTrack(track);
+  return toStudioTrack(track);
 }
 
 /** Convert track to mp3 if needed + zmasterovat (ticho, normalizace). */

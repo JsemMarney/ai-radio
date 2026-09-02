@@ -1,15 +1,17 @@
-/** Real-time byte pacer — drží výstup na ~192 kbps, MP3 frame-aligned chunky. */
+import { getStreamBitrate } from "@/lib/ffmpeg";
 
-export const STREAM_BITRATE = 192_000;
+/** Real-time byte pacer — drží výstup na konfigurované kbps, MP3 frame-aligned chunky. */
+
+export const STREAM_BITRATE = getStreamBitrate();
 export const BYTES_PER_SECOND = STREAM_BITRATE / 8;
 
-/** ~1 s buffer před startem / po underrunu. */
-const PREBUFFER_BYTES = Math.floor(BYTES_PER_SECOND * 1);
-/** Povolené zpoždění oproti wall clock (~1.5 s). */
-const MAX_LAG_BYTES = Math.floor(BYTES_PER_SECOND * 1.5);
-/** Minimální velikost emitu — celé MP3 rámce (192k CBR ≈ 626 B). */
-const MP3_FRAME_BYTES = 626;
-const MIN_EMIT_BYTES = MP3_FRAME_BYTES * 4;
+/** Jen při prvním startu relace — ne mezi skladbami. */
+const INITIAL_PREBUFFER_BYTES = Math.floor(BYTES_PER_SECOND * 0.35);
+/** Povolené zpoždění oproti wall clock (~4 s). */
+const MAX_LAG_BYTES = Math.floor(BYTES_PER_SECOND * 4);
+/** Minimální velikost emitu — celé MP3 rámce (256k CBR ≈ 1040 B). */
+const MP3_FRAME_BYTES = 1040;
+const MIN_EMIT_BYTES = MP3_FRAME_BYTES * 2;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -38,7 +40,8 @@ export class StreamPacer {
   private draining = false;
   private stopped = false;
   private waitTimer: ReturnType<typeof setTimeout> | null = null;
-  private primed = false;
+  /** Po prvním audiu už nečekat na velký prebuffer mezi skladbami. */
+  private sessionPrimed = false;
 
   constructor(private readonly emit: (chunk: Buffer) => void) {}
 
@@ -51,15 +54,14 @@ export class StreamPacer {
   /** Počkej až se fronta vyprázdní (konec segmentu). */
   async flush(): Promise<void> {
     while ((this.queue.length > 0 || this.draining) && !this.stopped) {
-      await sleep(15);
+      await sleep(8);
     }
   }
 
-  /** Zahodí neodeslaná data aktuálního segmentu, ale drží celkové tempo. */
+  /** Zahodí neodeslaná data aktuálního segmentu, ale drží celkové tempo relace. */
   abortSegment(): void {
     this.queue = [];
     this.draining = false;
-    this.primed = false;
     if (this.waitTimer) {
       clearTimeout(this.waitTimer);
       this.waitTimer = null;
@@ -69,7 +71,7 @@ export class StreamPacer {
   stop(): void {
     this.stopped = true;
     this.queue = [];
-    this.primed = false;
+    this.sessionPrimed = false;
     if (this.waitTimer) {
       clearTimeout(this.waitTimer);
       this.waitTimer = null;
@@ -91,7 +93,7 @@ export class StreamPacer {
     if (lag >= MIN_EMIT_BYTES) return;
 
     const deficit = MIN_EMIT_BYTES - lag;
-    const ms = Math.min(80, Math.max(4, (deficit / BYTES_PER_SECOND) * 1000));
+    const ms = Math.min(50, Math.max(2, (deficit / BYTES_PER_SECOND) * 1000));
     await new Promise<void>((resolve) => {
       this.waitTimer = setTimeout(resolve, ms);
     });
@@ -103,16 +105,15 @@ export class StreamPacer {
 
     while (this.queue.length > 0 && !this.stopped) {
       const queued = this.queuedBytes();
-      if (!this.primed && queued < PREBUFFER_BYTES) {
-        await sleep(20);
+      if (!this.sessionPrimed && queued < INITIAL_PREBUFFER_BYTES) {
+        await sleep(8);
         continue;
       }
-      this.primed = true;
+      this.sessionPrimed = true;
 
       const lag = this.targetBytes() - this.totalSent;
       if (lag < MIN_EMIT_BYTES) {
         if (lag < -MAX_LAG_BYTES) {
-          // Příliš napřed — krátce počkej.
           await this.waitForBudget();
           continue;
         }
@@ -147,10 +148,6 @@ export class StreamPacer {
       } else {
         this.queue[0] = head.subarray(take);
       }
-    }
-
-    if (this.queue.length === 0) {
-      this.primed = false;
     }
 
     this.draining = false;

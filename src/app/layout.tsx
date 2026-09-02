@@ -14,13 +14,14 @@ const sans = Barlow({
 const display = Barlow_Condensed({
   variable: "--font-display",
   subsets: ["latin", "latin-ext"],
-  weight: ["600", "700"],
+  weight: ["600"],
 });
 
 const mono = IBM_Plex_Mono({
   variable: "--font-mono",
   subsets: ["latin", "latin-ext"],
   weight: ["400", "500"],
+  preload: false,
 });
 
 const station = getStationConfig();

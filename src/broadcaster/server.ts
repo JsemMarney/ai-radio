@@ -7,13 +7,27 @@ import { createReadStream } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { once } from "node:events";
 import { IcyStreamEncoder, icyMetaInterval } from "@/lib/icy-stream";
+import {
+  getIcecastListenUrl,
+  isIcecastEnabled,
+  waitForIcecastReady,
+} from "@/lib/icecast-config";
+import {
+  fetchIcecastListeners,
+  getCachedIcecastListeners,
+} from "@/lib/icecast-stats";
+import { IcecastSource } from "@/lib/icecast-source";
 import { getStreamPort } from "@/lib/radio-broker";
-import { getRadioEngine } from "@/lib/radio-engine";
+import { QUEUE_DISPLAY_SIZE } from "@/lib/radio-playlist";
+import { areSongRequestsEnabled } from "@/lib/song-requests";
+import { getRadioEngine, type RadioStatus } from "@/lib/radio-engine";
 import {
   refreshBroadcastLock,
   releaseBroadcastLock,
   tryAcquireBroadcastLock,
 } from "@/lib/radio-state";
+import { verifyBrokerRequest } from "@/lib/broker-auth";
+import { getStreamBitrate } from "@/lib/ffmpeg";
 import { getStationConfig } from "@/lib/station-config";
 
 type SseClient = ServerResponse;
@@ -29,6 +43,26 @@ const streamClients = new Set<StreamClient>();
 let httpServer: Server | null = null;
 let lockTimer: ReturnType<typeof setInterval> | null = null;
 let lastIcyTitle = "";
+let icecastSource: IcecastSource | null = null;
+let icecastStatsTimer: ReturnType<typeof setInterval> | null = null;
+let detachIcecastSink: (() => void) | null = null;
+let lastReportedIcecastListeners = -1;
+
+function withStreamMeta(status: RadioStatus): RadioStatus & {
+  streamUrl: string;
+  icecastLive: boolean;
+} {
+  const icecastLive = Boolean(icecastSource?.isConnected);
+  if (isIcecastEnabled() && icecastLive) {
+    return {
+      ...status,
+      listeners: getCachedIcecastListeners(),
+      streamUrl: getIcecastListenUrl(),
+      icecastLive: true,
+    };
+  }
+  return { ...status, streamUrl: "/stream", icecastLive: false };
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
@@ -48,7 +82,8 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 function pushSse(status: ReturnType<ReturnType<typeof getRadioEngine>["getStatus"]>): void {
-  const payload = `data: ${JSON.stringify(status)}\n\n`;
+  const enriched = withStreamMeta(status);
+  const payload = `data: ${JSON.stringify(enriched)}\n\n`;
   for (const client of sseClients) {
     try {
       client.write(payload);
@@ -60,6 +95,7 @@ function pushSse(status: ReturnType<ReturnType<typeof getRadioEngine>["getStatus
   const title = getRadioEngine().getIcyTitle();
   if (title !== lastIcyTitle) {
     lastIcyTitle = title;
+    icecastSource?.setTitle(title);
     for (const client of streamClients) {
       if (client.closed || !client.icy) continue;
       client.icy.setTitle(title);
@@ -76,6 +112,17 @@ async function writeChunk(res: ServerResponse, chunk: Buffer): Promise<void> {
 }
 
 function handleStream(req: IncomingMessage, res: ServerResponse): void {
+  if (isIcecastEnabled() && icecastSource?.isConnected) {
+    const listenUrl = getIcecastListenUrl();
+    res.writeHead(302, {
+      Location: listenUrl,
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(`Přesměrování na Icecast: ${listenUrl}`);
+    return;
+  }
+
   const engine = getRadioEngine();
   const station = getStationConfig();
   const wantsIcy =
@@ -93,7 +140,7 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
     "Accept-Ranges": "none",
     "icy-name": station.name,
     "icy-genre": "Various",
-    "icy-br": "192",
+    "icy-br": String(Math.floor(getStreamBitrate() / 1000)),
     "icy-url": `http://127.0.0.1:${webPort}/player`,
     "icy-pub": "1",
   };
@@ -196,16 +243,28 @@ async function handleRequest(
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   const engine = getRadioEngine();
 
+  const isControlRoute =
+    (req.method === "POST" &&
+      url.pathname !== "/request" &&
+      !url.pathname.startsWith("/request/")) ||
+    url.pathname === "/transition-preview";
+
+  if (isControlRoute && !verifyBrokerRequest(req)) {
+    sendJson(res, 401, { error: "Neautorizováno." });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/stream") {
     handleStream(req, res);
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/status") {
-    sendJson(res, 200, {
-      ...engine.getStatus(),
-      streamUrl: "/stream",
-    });
+    const status = withStreamMeta(engine.getStatus());
+    if (isIcecastEnabled()) {
+      status.listeners = await fetchIcecastListeners();
+    }
+    sendJson(res, 200, status);
     return;
   }
 
@@ -238,13 +297,45 @@ async function handleRequest(
   }
 
   if (req.method === "GET" && url.pathname === "/queue") {
-    const limit = Math.min(10, Number(url.searchParams.get("limit") ?? 5) || 5);
-    const upcoming = await engine.getUpcoming(limit);
+    const limit = Math.min(
+      QUEUE_DISPLAY_SIZE,
+      Number(url.searchParams.get("limit") ?? QUEUE_DISPLAY_SIZE) || QUEUE_DISPLAY_SIZE,
+    );
+    const preview = await engine.getQueuePreview(limit);
+    sendJson(res, 200, preview);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/requests") {
+    if (!areSongRequestsEnabled()) {
+      sendJson(res, 200, { enabled: false, tracks: [], pending: 0 });
+      return;
+    }
+    const search = url.searchParams.get("search") ?? undefined;
+    const limit = Math.min(60, Number(url.searchParams.get("limit") ?? 40) || 40);
+    const tracks = await engine.getRequestableTracks(search, limit);
     sendJson(res, 200, {
-      upcoming,
-      reserved: engine.reservedNextUuid ?? null,
-      queueRemaining: engine.getStatus().queueRemaining,
+      enabled: true,
+      tracks,
+      pending: engine.getStatus().requestsPending,
     });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/request") {
+    try {
+      const raw = await readBody(req);
+      const body = JSON.parse(raw) as { uuid?: string };
+      const uuid = body.uuid?.trim();
+      if (!uuid) {
+        sendJson(res, 400, { error: "Chybí uuid." });
+        return;
+      }
+      const result = await engine.submitListenerRequest(uuid);
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { error: "Neplatný JSON." });
+    }
     return;
   }
 
@@ -323,6 +414,14 @@ async function shutdown(): Promise<void> {
     clearInterval(lockTimer);
     lockTimer = null;
   }
+  if (icecastStatsTimer) {
+    clearInterval(icecastStatsTimer);
+    icecastStatsTimer = null;
+  }
+  detachIcecastSink?.();
+  detachIcecastSink = null;
+  await icecastSource?.stop();
+  icecastSource = null;
 
   for (const client of sseClients) {
     try {
@@ -342,10 +441,79 @@ async function shutdown(): Promise<void> {
   }
 
   await getRadioEngine().stop();
-  await releaseBroadcastLock();
 }
 
+/** Napojí plné API na existující HTTP server a spustí engine na pozadí. */
+export function attachBroadcasterEngine(server: Server): void {
+  httpServer = server;
+  server.removeAllListeners("request");
+  server.on("request", (req, res) => {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    if (req.method === "GET" && url.pathname === "/health") {
+      sendJson(res, 200, { ok: true, pid: process.pid, booting: false });
+      return;
+    }
+    void handleRequest(req, res);
+  });
+
+  const port = getStreamPort();
+  if (isIcecastEnabled()) {
+    console.log(
+      `[broadcaster] Icecast zapnutý — posluchači: ${getIcecastListenUrl()} (nebo :8788/stream dokud Icecast nestartuje)`,
+    );
+  } else {
+    console.log(`[broadcaster] Stream (live)     → http://127.0.0.1:${port}/stream`);
+  }
+  console.log(`[broadcaster] Status / SSE      → http://127.0.0.1:${port}/events`);
+  console.log(`[broadcaster] Real-time pacer   → konstantní tempo, žádné přetáčení`);
+
+  const engine = getRadioEngine();
+  engine.onStatusChange = pushSse;
+
+  if (isIcecastEnabled()) {
+    void (async () => {
+      const ready = await waitForIcecastReady(15_000);
+      if (!ready) {
+        console.warn(
+          "[broadcaster] Icecast neběží — stream přes http://127.0.0.1:8788/stream",
+        );
+        return;
+      }
+      icecastSource = new IcecastSource();
+      await icecastSource.start();
+      if (!icecastSource.isConnected) return;
+
+      detachIcecastSink = engine.attachSink((chunk) => {
+        icecastSource?.write(Buffer.from(chunk));
+      });
+      icecastStatsTimer = setInterval(() => {
+        void fetchIcecastListeners().then((count) => {
+          if (count === lastReportedIcecastListeners) return;
+          lastReportedIcecastListeners = count;
+          pushSse(engine.getStatus());
+        });
+      }, 5_000);
+    })();
+  }
+
+  console.log("[broadcaster] Načítám knihovnu…");
+  void engine
+    .start()
+    .then(() => {
+      console.log("[broadcaster] Engine běží.");
+    })
+    .catch((error: unknown) => {
+      console.error(
+        "[broadcaster] Engine start selhal:",
+        error instanceof Error ? error.message : error,
+      );
+    });
+}
+
+/** @deprecated použij scripts/broadcaster.ts bootstrap */
 export async function startBroadcaster(): Promise<void> {
+  console.log("[broadcaster] Spouštím…");
+
   const locked = await tryAcquireBroadcastLock();
   if (!locked) {
     console.error("[broadcaster] Jiný broadcaster už běží (lock).");
@@ -356,20 +524,17 @@ export async function startBroadcaster(): Promise<void> {
     void refreshBroadcastLock();
   }, 15_000);
 
-  const engine = getRadioEngine();
-  engine.onStatusChange = pushSse;
-  await engine.start();
-
   const port = getStreamPort();
   httpServer = http.createServer((req, res) => {
     void handleRequest(req, res);
   });
 
-  httpServer.listen(port, "127.0.0.1", () => {
-    console.log(`[broadcaster] Stream (live)     → http://127.0.0.1:${port}/stream`);
-    console.log(`[broadcaster] Status / SSE      → http://127.0.0.1:${port}/events`);
-    console.log(`[broadcaster] Real-time pacer   → konstantní tempo, žádné přetáčení`);
+  await new Promise<void>((resolve, reject) => {
+    httpServer!.once("error", reject);
+    httpServer!.listen(port, "127.0.0.1", () => resolve());
   });
+
+  await attachBroadcasterEngine(httpServer);
 
   const onSignal = () => {
     void shutdown().finally(() => process.exit(0));

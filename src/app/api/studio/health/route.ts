@@ -1,6 +1,5 @@
-import { existsSync } from "node:fs";
 import { brokerFetch } from "@/lib/radio-broker";
-import { getJingleConfig, getMidsongConfig } from "@/lib/audio-process";
+import { getMidsongConfig } from "@/lib/audio-process";
 import { listTracks, listTracksWithAudio } from "@/lib/library";
 import { getToolVersions } from "@/lib/remaster";
 
@@ -23,7 +22,6 @@ export async function GET() {
     ? ((await statusRes.json()) as Record<string, unknown>)
     : null;
 
-  const jingle = getJingleConfig();
   const midsong = getMidsongConfig();
 
   return Response.json({
@@ -42,15 +40,11 @@ export async function GET() {
       needsRemaster: playable.filter((t) => !t.processedAt).length,
     },
     tools,
-    jingle: {
-      configured: Boolean(jingle.path && existsSync(jingle.path)),
-      everyNTracks: jingle.everyNTracks,
-      path: jingle.path,
-    },
     midsong: {
       configured: midsong.paths.length > 0,
       count: midsong.paths.length,
-      everyNTracks: midsong.everyNTracks,
+      minTracks: midsong.minTracks,
+      maxTracks: midsong.maxTracks,
       chance: midsong.chance,
       fadeSec: midsong.fadeSec,
     },

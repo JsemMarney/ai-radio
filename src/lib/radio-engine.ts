@@ -7,22 +7,26 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  buildCrossfadeFromFilterGraph,
   buildHeadLinearFadeFilter,
+  buildMidsongLiveTransitionFilterGraph,
   buildMidsongPreviewFilterGraph,
   buildPairCrossfadeFilterGraph,
   buildTailLinearFadeFilter,
   buildTransitionPreviewFilterGraph,
-  computePairFade,
-  getJingleConfig,
   getMidsongConfig,
   getMidsongPreviewTiming,
   getTransitionPreviewTiming,
-  pairCrossfadeStartSec,
   pickMidsongPath,
   probePlayableDuration,
+  randomMidsongInterval,
   type MidsongConfig,
   type MidsongPreviewTiming,
 } from "@/lib/audio-process";
+import {
+  computePairFade,
+  pairCrossfadeStartSec,
+} from "@/lib/fade-math";
 import {
   getCrossfadeSec,
   getRadioTransition,
@@ -32,11 +36,20 @@ import {
 } from "@/lib/ffmpeg";
 import { getDownloadsDir, getTrack } from "@/lib/library";
 import {
+  areSongRequestsEnabled,
+  enqueueListenerRequest,
+  getListenerRequestQueue,
+  getRequestableTracks,
+  setListenerRequestQueue,
+  validateListenerRequest,
+} from "@/lib/song-requests";
+import {
   ensureQueueDepth,
   loadBag,
   peekFromBag,
   prependToBag,
   QUEUE_TARGET_SIZE,
+  QUEUE_DISPLAY_SIZE,
   removeFromBag,
   saveBag,
 } from "@/lib/radio-playlist";
@@ -47,7 +60,12 @@ import {
   type RadioNowPlaying,
 } from "@/lib/radio-state";
 import { ensureBroadcastFile } from "@/lib/remaster";
+import { buildProgramSchedule, sliceScheduleForDisplay } from "@/lib/program-schedule";
 import { StreamPacer } from "@/lib/stream-pacer";
+import type {
+  PlaybackSegment,
+  ScheduledTrack,
+} from "@/lib/types";
 
 export type RadioStatus = {
   nowPlaying: RadioNowPlaying | null;
@@ -57,7 +75,25 @@ export type RadioStatus = {
   broadcasting: boolean;
   queueRemaining: number;
   sessionId: string | null;
+  upcoming: RadioNowPlaying[];
+  schedule: ScheduledTrack[];
+  nextUp: ScheduledTrack | null;
+  segment: PlaybackSegment;
+  crossfadeSec: number;
+  /** Inkrementuje se při skipu / testu — klient obnoví MP3 dekodér. */
+  streamEpoch: number;
+  /** Zbývající přechody do další šance na midsong (sync s enginem). */
+  songsUntilMidsong: number;
+  /** Odhad délky midsong souboru (s). */
+  midsongDurationSec: number;
+  midsongConfigured: boolean;
+  midsongMinTracks: number;
+  midsongMaxTracks: number;
+  requestsEnabled: boolean;
+  requestsPending: number;
 };
+
+type BroadcastSink = (chunk: Uint8Array) => void;
 
 type Subscriber = {
   enqueue: (chunk: Uint8Array) => void;
@@ -72,6 +108,7 @@ const execFileAsync = promisify(execFile);
 
 export class RadioEngine {
   private subscribers = new Set<Subscriber>();
+  private sinks = new Set<BroadcastSink>();
   private bag: string[] = [];
   private lastPlayedUuid: string | null = null;
   private loopRunning = false;
@@ -88,16 +125,20 @@ export class RadioEngine {
   private ffmpegPath: string | null = null;
   private durationCache = new Map<string, number>();
   private started = false;
-  private tracksSinceJingle = 0;
-  private jinglePath: string | null = null;
-  private jingleEvery = 4;
   private midsongConfig: MidsongConfig = {
     paths: [],
-    everyNTracks: 1,
+    minTracks: 3,
+    maxTracks: 6,
     chance: 1,
     fadeSec: 4,
   };
-  private transitionsSinceMidsong = 0;
+  private songsUntilMidsong = 0;
+  private upcomingCache: RadioNowPlaying[] = [];
+  private scheduleCache: ScheduledTrack[] = [];
+  private currentSegment: PlaybackSegment = "song";
+  private streamEpoch = 0;
+  private midsongDurationSec = 6;
+  private listenerRequests: string[] = [];
 
   nowPlaying: RadioNowPlaying | null = null;
   trackStartedAt: string | null = null;
@@ -115,6 +156,7 @@ export class RadioEngine {
   private lastSseTrackKey = "";
 
   getStatus(): RadioStatus {
+    const display = QUEUE_DISPLAY_SIZE;
     return {
       nowPlaying: this.nowPlaying,
       trackStartedAt: this.trackStartedAt,
@@ -125,18 +167,55 @@ export class RadioEngine {
       broadcasting: this.started,
       queueRemaining: this.queueRemaining,
       sessionId: this.sessionId,
+      upcoming: this.upcomingCache.slice(0, display),
+      schedule: sliceScheduleForDisplay(this.scheduleCache, display),
+      nextUp: this.scheduleCache[0] ?? null,
+      segment: this.currentSegment,
+      crossfadeSec: getCrossfadeSec(),
+      streamEpoch: this.streamEpoch,
+      songsUntilMidsong: this.songsUntilMidsong,
+      midsongDurationSec: this.midsongDurationSec,
+      midsongConfigured: this.midsongConfig.paths.length > 0,
+      midsongMinTracks: this.midsongConfig.minTracks,
+      midsongMaxTracks: this.midsongConfig.maxTracks,
+      requestsEnabled: areSongRequestsEnabled(),
+      requestsPending: this.listenerRequests.length,
     };
+  }
+
+  private async refreshProgramCache(): Promise<void> {
+    this.upcomingCache = await this.getUpcoming(QUEUE_TARGET_SIZE);
+    const np = this.nowPlaying as (RadioNowPlaying & { durationSec?: number | null }) | null;
+    const midsongConfigured = this.midsongConfig.paths.length > 0;
+    this.scheduleCache = buildProgramSchedule({
+      nowPlaying: np,
+      trackStartedAt: this.trackStartedAt,
+      upcoming: this.upcomingCache,
+      crossfadeSec: getCrossfadeSec(),
+      songsUntilMidsong: this.songsUntilMidsong,
+      stingerEveryAvg:
+        (this.midsongConfig.minTracks + this.midsongConfig.maxTracks) / 2,
+      stingerSec: this.midsongDurationSec,
+      showStingers: midsongConfigured,
+      stingerLabel: "Midsong",
+    });
   }
 
   private emitStatus(force = false): void {
     const trackKey = [
       this.nowPlaying?.uuid ?? "",
       this.recentlyPlayed.map((t) => t.uuid).join(","),
+      this.upcomingCache.map((t) => t.uuid).join(","),
+      this.currentSegment,
+      String(this.songsUntilMidsong),
     ].join("|");
 
     if (!force && trackKey === this.lastSseTrackKey) return;
     this.lastSseTrackKey = trackKey;
-    this.onStatusChange?.(this.getStatus());
+
+    void this.refreshProgramCache().then(() => {
+      this.onStatusChange?.(this.getStatus());
+    });
   }
 
   private emitListeners(): void {
@@ -148,11 +227,10 @@ export class RadioEngine {
     let subscriber!: Subscriber;
     let flushPending: (() => void) | null = null;
 
-    return new ReadableStream<Uint8Array>({
-      highWaterMark: 256,
+    return new ReadableStream<Uint8Array>(
+      {
       start(controller) {
         const pending: Uint8Array[] = [];
-        const MAX_PENDING = 384;
 
         flushPending = () => {
           while (pending.length > 0) {
@@ -167,9 +245,6 @@ export class RadioEngine {
         subscriber = {
           enqueue(chunk) {
             pending.push(chunk);
-            if (pending.length > MAX_PENDING) {
-              pending.splice(0, pending.length - MAX_PENDING);
-            }
             flushPending?.();
           },
           close() {
@@ -191,7 +266,9 @@ export class RadioEngine {
       cancel() {
         engine.unsubscribe(subscriber);
       },
-    });
+    },
+    { highWaterMark: 256 },
+    );
   }
 
   skip(): void {
@@ -276,6 +353,32 @@ export class RadioEngine {
     this.stopCurrent();
   }
 
+  async getRequestableTracks(search?: string, limit = 40) {
+    const blocked = [
+      this.nowPlaying?.uuid,
+      ...this.getRecentUuids(),
+      ...this.listenerRequests,
+    ].filter(Boolean) as string[];
+    return getRequestableTracks({ search, limit, excludeUuids: blocked });
+  }
+
+  async submitListenerRequest(
+    uuid: string,
+  ): Promise<{ ok: boolean; error?: string; position?: number }> {
+    const blocked = [
+      this.nowPlaying?.uuid,
+      ...this.getRecentUuids(),
+    ].filter(Boolean) as string[];
+    const valid = await validateListenerRequest(uuid, blocked);
+    if (!valid.ok) {
+      return { ok: false, error: valid.error };
+    }
+    const position = await enqueueListenerRequest(uuid);
+    this.listenerRequests = await getListenerRequestQueue();
+    this.emitStatus(true);
+    return { ok: true, position };
+  }
+
   async start(): Promise<void> {
     const boot = await setBroadcasting(true);
     this.sessionId = boot.sessionId;
@@ -305,15 +408,25 @@ export class RadioEngine {
     const playlist = await loadBag();
     this.bag = playlist.bag;
     this.lastPlayedUuid = playlist.lastPlayedUuid;
+    this.listenerRequests = await getListenerRequestQueue();
     await this.refillBag();
 
     this.ffmpegPath = await resolveFfmpeg();
-    const jingle = getJingleConfig();
-    this.jingleEvery = jingle.everyNTracks;
-    this.jinglePath = jingle.path;
     this.midsongConfig = getMidsongConfig();
-    this.transitionsSinceMidsong = 0;
+    this.songsUntilMidsong = randomMidsongInterval(this.midsongConfig);
+    if (this.midsongConfig.paths.length) {
+      const midPath = this.midsongConfig.paths[0]!;
+      const probed = await probeDuration(midPath);
+      if (probed && probed > 0) {
+        this.midsongDurationSec = probed;
+      }
+    }
     this.started = true;
+    if (this.nowPlaying?.uuid) {
+      const enriched = await this.trackToNowPlaying(this.nowPlaying.uuid);
+      if (enriched) this.nowPlaying = enriched;
+    }
+    await this.refreshProgramCache();
     if (!this.loopRunning) void this.runLoop();
     this.emitStatus(true);
   }
@@ -326,6 +439,7 @@ export class RadioEngine {
   }
 
   private stopCurrent(): void {
+    this.streamEpoch += 1;
     this.skipRequested = true;
     this.sessionPacer?.stop();
     this.sessionPacer = null;
@@ -338,6 +452,7 @@ export class RadioEngine {
       setTimeout(() => this.currentProc?.kill("SIGKILL"), 500);
       this.currentProc = null;
     }
+    this.emitStatus(true);
   }
 
   private unsubscribe(subscriber: Subscriber): void {
@@ -417,6 +532,19 @@ export class RadioEngine {
     return out.slice(0, limit);
   }
 
+  /** Fronta + odhad startů pro UI (zobrazí max displayLimit skladeb). */
+  async getQueuePreview(limit = QUEUE_DISPLAY_SIZE) {
+    await this.refreshProgramCache();
+    const displayLimit = Math.min(Math.max(1, limit), QUEUE_DISPLAY_SIZE);
+    return {
+      upcoming: this.upcomingCache.slice(0, displayLimit),
+      schedule: sliceScheduleForDisplay(this.scheduleCache, displayLimit),
+      nextUp: this.scheduleCache[0] ?? null,
+      queueRemaining: this.queueRemaining,
+      reserved: this.reservedNextUuid,
+    };
+  }
+
   /** Odebere skladbu z fronty (studio). */
   async removeFromQueue(uuid: string): Promise<boolean> {
     if (!this.bag.includes(uuid) && this.reservedNextUuid !== uuid) {
@@ -446,19 +574,7 @@ export class RadioEngine {
     };
   }
 
-  private async maybePlayJingle(): Promise<void> {
-    if (!this.jinglePath || this.skipRequested) return;
-    if (this.tracksSinceJingle < this.jingleEvery) return;
-    this.tracksSinceJingle = 0;
-    this.skipRequested = false;
-    await this.streamBroadcastFile(this.jinglePath);
-  }
-
-  private onTrackFinished(): void {
-    this.tracksSinceJingle += 1;
-  }
-
-  /** Vložit midsong mezi skladby (test: every=1, chance=1). */
+  /** Stinger (midsong) náhodně každých min–max skladeb — rozhodnutí až na konci skladby. */
   private shouldPlayMidsong(): boolean {
     this.midsongConfig = getMidsongConfig();
     if (!this.midsongConfig.paths.length) {
@@ -468,73 +584,140 @@ export class RadioEngine {
       console.warn("[radio] Midsong vypnuto — chybí ffmpeg.");
       return false;
     }
-    this.transitionsSinceMidsong += 1;
-    if (this.transitionsSinceMidsong < this.midsongConfig.everyNTracks) {
+    this.songsUntilMidsong -= 1;
+    if (this.songsUntilMidsong > 0) {
       return false;
     }
-    this.transitionsSinceMidsong = 0;
+    this.songsUntilMidsong = randomMidsongInterval(this.midsongConfig);
     if (Math.random() > this.midsongConfig.chance) {
+      console.info("[radio] Midsong přeskočen (náhoda).");
       return false;
     }
     return true;
   }
 
-  private async streamPairViaMidsong(
+  private async streamMidsongTransition(
+    pathA: string,
+    pathB: string,
+    currentUuid: string,
+    nextUuid: string,
+    durA: number,
+    startA: number,
+    midsongPath: string,
+  ): Promise<{ finished: boolean; nextStarted: boolean }> {
+    const fadeSec = this.midsongConfig.fadeSec;
+    const midDur =
+      (this.ffmpegPath
+        ? await probePlayableDuration(midsongPath, this.ffmpegPath)
+        : null) ??
+      (await probeDuration(midsongPath)) ??
+      6;
+    const tailA = Math.max(0.1, durA - startA);
+
+    this.currentSegment = "stinger";
+    this.emitStatus(true);
+
+    const filter = buildMidsongLiveTransitionFilterGraph(
+      startA,
+      durA,
+      midDur,
+      fadeSec,
+    );
+
+    const stingerDelayMs = Math.max(0, (tailA - fadeSec) * 1000);
+    let stingerTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      stingerTimer = null;
+      if (this.skipRequested) return;
+      void this.commitNext(currentUuid);
+      void this.markPlayed(currentUuid);
+    }, stingerDelayMs);
+
+    const nextDelayMs = Math.max(0, (tailA + midDur) * 1000);
+    let nextTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      nextTimer = null;
+      if (this.skipRequested) return;
+      void this.commitNext(nextUuid);
+      void this.markPlayed(nextUuid);
+      void this.setNowPlaying(nextUuid, { finishedPrevious: true });
+      this.currentSegment = "song";
+      this.emitStatus(true);
+    }, nextDelayMs);
+
+    let ok = false;
+    try {
+      ok = await this.streamFfmpeg([
+        "-i",
+        pathA,
+        "-i",
+        midsongPath,
+        "-i",
+        pathB,
+        "-filter_complex",
+        filter,
+        ...mp3EncodeArgs("[aout]"),
+      ]);
+    } finally {
+      if (stingerTimer) clearTimeout(stingerTimer);
+      if (nextTimer) clearTimeout(nextTimer);
+      if (!this.skipRequested) {
+        await this.commitNext(currentUuid);
+        await this.commitNext(nextUuid);
+        await this.markPlayed(nextUuid);
+      }
+    }
+
+    if (!ok && !this.skipRequested) {
+      console.warn("[radio] Midsong ffmpeg selhal — fallback na crossfade/cut.");
+    }
+
+    this.currentSegment = "song";
+    this.emitStatus(true);
+
+    if (this.skipRequested) {
+      return { finished: false, nextStarted: true };
+    }
+
+    return { finished: ok, nextStarted: ok };
+  }
+
+  private async streamCrossfadeFrom(
     pathA: string,
     pathB: string,
     currentUuid: string,
     nextUuid: string,
     durA: number,
     durB: number,
-    midsongPath: string,
+    startA: number,
+    fadeSec: number,
   ): Promise<{ finished: boolean; nextStarted: boolean }> {
-    const fadeSec = this.midsongConfig.fadeSec;
-    this.skipRequested = false;
-    await this.setNowPlaying(currentUuid);
+    this.currentSegment = "crossfade";
+    void this.commitNext(currentUuid);
+    void this.commitNext(nextUuid);
+    void this.markPlayed(nextUuid);
+    void this.setNowPlaying(nextUuid, {
+      atCrossfade: true,
+      finishedPrevious: true,
+    });
+    this.emitStatus(true);
 
-    await this.streamFfmpeg([
+    const filter = buildCrossfadeFromFilterGraph(startA, durA, durB, fadeSec);
+    const ok = await this.streamFfmpeg([
       "-i",
       pathA,
-      "-filter_complex",
-      buildTailLinearFadeFilter(durA, fadeSec),
-      ...mp3EncodeArgs("[aout]"),
-    ]);
-
-    if (this.skipRequested) {
-      return { finished: false, nextStarted: false };
-    }
-
-    await this.commitNext(currentUuid);
-    await this.markPlayed(currentUuid);
-
-    await this.streamFfmpeg([
-      "-i",
-      midsongPath,
-      ...mp3EncodeArgs(),
-    ]);
-
-    if (this.skipRequested) {
-      await this.returnReserved(nextUuid);
-      return { finished: true, nextStarted: false };
-    }
-
-    await this.commitNext(nextUuid);
-    await this.markPlayed(nextUuid);
-    await this.setNowPlaying(nextUuid, { finishedPrevious: true });
-
-    await this.streamFfmpeg([
       "-i",
       pathB,
       "-filter_complex",
-      buildHeadLinearFadeFilter(fadeSec),
+      filter,
       ...mp3EncodeArgs("[aout]"),
     ]);
+
+    this.currentSegment = "song";
 
     if (this.skipRequested) {
       return { finished: false, nextStarted: true };
     }
 
-    return { finished: true, nextStarted: true };
+    return { finished: ok, nextStarted: ok };
   }
 
   private broadcast(chunk: Buffer): void {
@@ -542,6 +725,21 @@ export class RadioEngine {
     for (const sub of this.subscribers) {
       sub.enqueue(data);
     }
+    for (const sink of this.sinks) {
+      try {
+        sink(data);
+      } catch {
+        // rozbitý sink (např. zavřený Icecast pipe)
+      }
+    }
+  }
+
+  /** Trvalý výstup (Icecast source) — nepočítá se jako HTTP posluchač. */
+  attachSink(sink: BroadcastSink): () => void {
+    this.sinks.add(sink);
+    return () => {
+      this.sinks.delete(sink);
+    };
   }
 
   /** Jeden pacer na celou relaci — bez resetu hodin mezi skladbami/jinglem. */
@@ -556,6 +754,12 @@ export class RadioEngine {
   private async peekNext(avoidUuid?: string | null): Promise<string | null> {
     if (this.playRequestUuid) {
       return this.playRequestUuid;
+    }
+
+    if (this.listenerRequests.length) {
+      const uuid = this.listenerRequests.shift()!;
+      await setListenerRequestQueue(this.listenerRequests);
+      return uuid;
     }
 
     const result = await peekFromBag(
@@ -663,6 +867,25 @@ export class RadioEngine {
     await this.streamRawFile(filepath);
   }
 
+  /** Přednačti další skladbu na disk, ať mezi přechody není pauza. */
+  private prefetchBroadcast(uuid: string | null): void {
+    if (!uuid) return;
+    void ensureBroadcastFile(uuid).catch(() => {});
+  }
+
+  private ffmpegBaseArgs(): string[] {
+    return [
+      "-hide_banner",
+      "-nostats",
+      "-loglevel",
+      "error",
+      "-probesize",
+      "32k",
+      "-analyzeduration",
+      "0",
+    ];
+  }
+
   private async setNowPlaying(
     uuid: string,
     options?: {
@@ -721,7 +944,7 @@ export class RadioEngine {
     const pacer = this.getPacer();
 
     await new Promise<void>((resolve) => {
-      const stream = createReadStream(filepath, { highWaterMark: 64 * 1024 });
+      const stream = createReadStream(filepath, { highWaterMark: 256 * 1024 });
       this.currentStream = stream;
 
       stream.on("data", (chunk: string | Buffer) => {
@@ -745,17 +968,21 @@ export class RadioEngine {
     });
   }
 
-  private async streamFfmpeg(args: string[]): Promise<void> {
-    if (!this.ffmpegPath) return;
+  private async streamFfmpeg(args: string[]): Promise<boolean> {
+    if (!this.ffmpegPath) return false;
     this.skipRequested = false;
     const pacer = this.getPacer();
 
-    await new Promise<void>((resolve) => {
-      const proc = spawn(this.ffmpegPath!, args, {
-        stdio: ["ignore", "pipe", "ignore"],
-        readableHighWaterMark: 64 * 1024,
+    return new Promise<boolean>((resolve) => {
+      const proc = spawn(this.ffmpegPath!, [...this.ffmpegBaseArgs(), ...args], {
+        stdio: ["ignore", "pipe", "pipe"],
       });
       this.currentProc = proc;
+
+      let stderr = "";
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        stderr = (stderr + chunk.toString()).slice(-4000);
+      });
 
       proc.stdout?.on("data", (chunk: Buffer) => {
         if (this.skipRequested) {
@@ -765,14 +992,20 @@ export class RadioEngine {
         pacer.enqueue(chunk);
       });
 
-      proc.on("close", () => {
+      proc.on("close", (code) => {
         this.currentProc = null;
-        void pacer.flush().then(resolve);
+        if (code !== 0 && code !== null && !this.skipRequested) {
+          console.error(
+            `[radio] ffmpeg ukončen s kódem ${code}: ${stderr.trim().slice(-800)}`,
+          );
+        }
+        void pacer.flush().then(() => resolve(code === 0 || code === null));
       });
-      proc.on("error", () => {
+      proc.on("error", (err) => {
         this.currentProc = null;
+        console.error("[radio] ffmpeg selhal:", err.message);
         pacer.abortSegment();
-        resolve();
+        resolve(false);
       });
     });
   }
@@ -1010,8 +1243,11 @@ export class RadioEngine {
       return { finished: false, nextStarted: false };
     }
 
-    const pathA = await ensureBroadcastFile(currentUuid);
-    const pathB = await ensureBroadcastFile(nextUuid);
+    const [pathA, pathB] = await Promise.all([
+      ensureBroadcastFile(currentUuid),
+      ensureBroadcastFile(nextUuid),
+    ]);
+    this.prefetchBroadcast(await this.peekNext(nextUuid));
     if (!pathA || !pathB) {
       this.bag = this.bag.filter((id) => id !== currentUuid && id !== nextUuid);
       return { finished: false, nextStarted: false };
@@ -1041,77 +1277,68 @@ export class RadioEngine {
     const durA = await this.getDuration(currentUuid, pathA);
     const durB = await this.getDuration(nextUuid, pathB);
     const fadeSec = getCrossfadeSec();
-
-    if (this.shouldPlayMidsong()) {
-      const midsongPath = pickMidsongPath(this.midsongConfig);
-      if (midsongPath) {
-        console.info(`[radio] Midsong: ${path.basename(midsongPath)}`);
-        return this.streamPairViaMidsong(
-          pathA,
-          pathB,
-          currentUuid,
-          nextUuid,
-          durA,
-          durB,
-          midsongPath,
-        );
-      }
-    }
-
     const useCrossfade =
       getRadioTransition() === "crossfade" && this.ffmpegPath && fadeSec > 0;
+    const fade = useCrossfade ? this.computeFade(durA, durB, fadeSec) : 0;
+    const transitionAt =
+      useCrossfade && fade >= 0.5
+        ? pairCrossfadeStartSec(durA, durB, fadeSec)
+        : Math.max(0, durA - fadeSec);
 
     this.skipRequested = false;
-
-    if (!useCrossfade) {
-      await this.commitNext(currentUuid);
-      await this.markPlayed(currentUuid);
-      await this.setNowPlaying(currentUuid);
-      await this.streamBroadcastFile(pathA);
-      return { finished: !this.skipRequested, nextStarted: false };
-    }
-
-    const fade = this.computeFade(durA, durB, fadeSec);
-    if (fade < 0.5) {
-      await this.setNowPlaying(currentUuid);
-      await this.streamBroadcastFile(pathA);
-      return { finished: !this.skipRequested, nextStarted: false };
-    }
-
-    this.skipRequested = false;
+    this.currentSegment = "song";
     await this.setNowPlaying(currentUuid);
 
-    const crossfadeAtMs = pairCrossfadeStartSec(durA, durB, fadeSec) * 1000;
-    let crossfadeTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-      crossfadeTimer = null;
-      if (this.skipRequested) return;
-      void this.commitNext(currentUuid);
-      void this.commitNext(nextUuid);
-      void this.markPlayed(nextUuid);
-      void this.setNowPlaying(nextUuid, {
-        atCrossfade: true,
-        finishedPrevious: true,
-      });
-    }, crossfadeAtMs);
-
-    try {
-      await this.streamPairCrossfade(pathA, pathB, durA, durB, fade);
-    } finally {
-      if (crossfadeTimer) {
-        clearTimeout(crossfadeTimer);
-        crossfadeTimer = null;
-        if (!this.skipRequested) {
-          await this.commitNext(currentUuid);
-          await this.commitNext(nextUuid);
-          await this.markPlayed(nextUuid);
-        }
-      }
+    if (transitionAt > 0.25) {
+      await this.streamBody(pathA, 0, transitionAt);
+    } else {
+      await this.streamBroadcastFile(pathA);
     }
 
     if (this.skipRequested) {
-      return { finished: false, nextStarted: true };
+      return { finished: false, nextStarted: false };
     }
 
+    const playMidsong = this.shouldPlayMidsong();
+    this.emitStatus(true);
+    const midsongPath = playMidsong
+      ? pickMidsongPath(this.midsongConfig)
+      : null;
+
+    if (midsongPath) {
+      console.info(`[radio] Midsong: ${path.basename(midsongPath)}`);
+      const result = await this.streamMidsongTransition(
+        pathA,
+        pathB,
+        currentUuid,
+        nextUuid,
+        durA,
+        transitionAt,
+        midsongPath,
+      );
+      if (result.finished || this.skipRequested) {
+        return result;
+      }
+      console.warn("[radio] Midsong selhal — pokračuji crossfade/cut.");
+    }
+
+    if (useCrossfade && fade >= 0.5) {
+      return this.streamCrossfadeFrom(
+        pathA,
+        pathB,
+        currentUuid,
+        nextUuid,
+        durA,
+        durB,
+        transitionAt,
+        fadeSec,
+      );
+    }
+
+    await this.commitNext(currentUuid);
+    await this.markPlayed(currentUuid);
+    await this.setNowPlaying(nextUuid, { finishedPrevious: true });
+    await this.streamBroadcastFile(pathB);
     return { finished: !this.skipRequested, nextStarted: true };
   }
 
@@ -1119,6 +1346,8 @@ export class RadioEngine {
     uuid: string,
     offsetSec = 0,
   ): Promise<boolean> {
+    this.prefetchBroadcast(await this.peekNext(uuid));
+
     const filepath = await ensureBroadcastFile(uuid);
     if (!filepath) {
       this.bag = this.bag.filter((id) => id !== uuid);
@@ -1204,8 +1433,6 @@ export class RadioEngine {
               continue;
             }
             if (played) {
-              this.onTrackFinished();
-              await this.maybePlayJingle();
               currentUuid = await this.peekNext();
               this.reservedNextUuid = currentUuid;
             }
@@ -1233,8 +1460,6 @@ export class RadioEngine {
               continue;
             }
             if (played) {
-              this.onTrackFinished();
-              await this.maybePlayJingle();
               currentUuid = await this.peekNext();
               this.reservedNextUuid = currentUuid;
             }
@@ -1254,6 +1479,7 @@ export class RadioEngine {
 
       const nextUuid = await this.peekNext(currentUuid);
       this.reservedNextUuid = nextUuid;
+      this.prefetchBroadcast(nextUuid);
 
       if (!nextUuid || nextUuid === currentUuid) {
         const played = await this.streamSolo(currentUuid);
@@ -1265,8 +1491,6 @@ export class RadioEngine {
           continue;
         }
         if (played) {
-          this.onTrackFinished();
-          await this.maybePlayJingle();
           currentUuid = await this.peekNext();
           this.reservedNextUuid = currentUuid;
         }
@@ -1292,8 +1516,6 @@ export class RadioEngine {
               continue;
             }
             if (played) {
-              this.onTrackFinished();
-              await this.maybePlayJingle();
               currentUuid = await this.peekNext();
               this.reservedNextUuid = currentUuid;
             }
@@ -1319,8 +1541,6 @@ export class RadioEngine {
               continue;
             }
             if (played) {
-              this.onTrackFinished();
-              await this.maybePlayJingle();
               currentUuid = await this.peekNext();
               this.reservedNextUuid = currentUuid;
             }
@@ -1337,11 +1557,6 @@ export class RadioEngine {
         currentUuid = await this.peekNext();
         this.reservedNextUuid = currentUuid;
         continue;
-      }
-
-      if (result.finished) {
-        this.onTrackFinished();
-        await this.maybePlayJingle();
       }
 
       if (result.finished && result.nextStarted) {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { listTracks, toPublicTrack } from "@/lib/library";
+import { listTracks, toStudioTrack } from "@/lib/library";
 
 export const runtime = "nodejs";
 
@@ -7,7 +7,7 @@ export async function GET() {
   try {
     const tracks = await listTracks();
     return NextResponse.json({
-      tracks: tracks.map(toPublicTrack),
+      tracks: tracks.map(toStudioTrack),
       count: tracks.length,
       ready: tracks.filter((t) => t.status === "ready").length,
     });

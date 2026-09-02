@@ -13,6 +13,8 @@ export type ImportJobItem = {
   title: string;
   artist: string;
   status: "pending" | "downloading" | "ready" | "failed" | "skipped";
+  /** Aktuální krok — hledání, stahování, zpracování… */
+  detail: string | null;
   uuid: string | null;
   error: string | null;
 };
@@ -27,6 +29,8 @@ export type ImportJob = {
   failed: number;
   skipped: number;
   current: string | null;
+  /** Lidsky čitelný popis kroku (např. „Hledám na YouTube…“). */
+  currentDetail: string | null;
   items: ImportJobItem[];
   error: string | null;
   createdAt: string;
@@ -67,7 +71,7 @@ export async function getJob(id: string): Promise<ImportJob | null> {
 export async function createPlaylistJob(input: {
   title: string;
   tracks: SpotifyTrackMeta[];
-  source?: "playlist" | "album";
+  source?: "playlist" | "album" | "track";
 }): Promise<ImportJob> {
   const now = new Date().toISOString();
   const job: ImportJob = {
@@ -80,11 +84,13 @@ export async function createPlaylistJob(input: {
     failed: 0,
     skipped: 0,
     current: null,
+    currentDetail: null,
     items: input.tracks.map((t) => ({
       spotifyId: t.id,
       title: t.title,
       artist: t.artist,
       status: "pending",
+      detail: null,
       uuid: null,
       error: null,
     })),
@@ -116,7 +122,9 @@ async function runPlaylistJob(
       if (!current) return;
 
       current.current = `${meta.artist} — ${meta.title}`;
+      current.currentDetail = "Kontroluji knihovnu…";
       current.items[i].status = "downloading";
+      current.items[i].detail = "Kontroluji knihovnu…";
       await saveJob(current);
 
       try {
@@ -126,21 +134,33 @@ async function runPlaylistJob(
           if (!latest) return;
           latest.items[i].uuid = existing.uuid;
           latest.items[i].status = "skipped";
+          latest.items[i].detail = "Už v knihovně";
           latest.items[i].error = null;
           latest.skipped += 1;
           latest.completed += 1;
+          latest.currentDetail = "Přeskočeno — už staženo";
           await saveJob(latest);
           continue;
         }
 
-        const track = await importSpotifyTrack(meta);
+        const track = await importSpotifyTrack(meta, async (progress) => {
+          const latest = await getJob(jobId);
+          if (!latest) return;
+          latest.currentDetail = progress.detail ?? null;
+          if (latest.items[i]) {
+            latest.items[i].detail = progress.detail ?? null;
+          }
+          await saveJob(latest);
+        });
         const latest = await getJob(jobId);
         if (!latest) return;
 
         latest.items[i].uuid = track.uuid;
         latest.items[i].status = "ready";
+        latest.items[i].detail = "Hotovo";
         latest.items[i].error = null;
         latest.completed += 1;
+        latest.currentDetail = "Hotovo";
         await saveJob(latest);
         invalidateTrackCache();
       } catch (error) {
@@ -149,8 +169,10 @@ async function runPlaylistJob(
         const message =
           error instanceof Error ? error.message : "Stažení selhalo.";
         latest.items[i].status = "failed";
+        latest.items[i].detail = "Selhalo";
         latest.items[i].error = message;
         latest.failed += 1;
+        latest.currentDetail = message;
         await saveJob(latest);
       }
     }
@@ -158,6 +180,7 @@ async function runPlaylistJob(
     const finalJob = await getJob(jobId);
     if (!finalJob) return;
     finalJob.current = null;
+    finalJob.currentDetail = null;
     finalJob.status = finalJob.failed === finalJob.total ? "failed" : "done";
     if (finalJob.status === "failed") {
       finalJob.error = "Všechny skladby selhaly.";

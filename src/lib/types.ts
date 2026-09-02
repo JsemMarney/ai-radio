@@ -8,6 +8,18 @@ export type RadioNowPlaying = {
   durationSec?: number | null;
 };
 
+export type ScheduledTrack = RadioNowPlaying & {
+  position: number;
+  startsAtMs: number;
+  startsInSec: number;
+  /** Položka programu — skladba nebo midsong/stinger mezi skladbami. */
+  kind?: "track" | "stinger";
+};
+
+export type ScheduledProgramItem = ScheduledTrack;
+
+export type PlaybackSegment = "song" | "crossfade" | "stinger";
+
 export type StationConfig = {
   name: string;
   tagline: string;
@@ -33,6 +45,7 @@ export type LibraryTrack = {
   sourceTitle: string | null;
   sourceUrl: string | null;
   downloadUrl: string | null;
+  audioFile?: string | null;
   status: string;
 };
 
@@ -46,11 +59,13 @@ export type ImportJob = {
   failed: number;
   skipped: number;
   current: string | null;
+  currentDetail: string | null;
   error: string | null;
   items: {
     title: string;
     artist: string;
     status: string;
+    detail: string | null;
     error: string | null;
   }[];
 };
@@ -83,15 +98,11 @@ export type StudioHealth = {
     needsRemaster: number;
   };
   tools: { ffmpeg: string | null; ytDlp: string | null };
-  jingle: {
-    configured: boolean;
-    everyNTracks: number;
-    path: string | null;
-  };
   midsong: {
     configured: boolean;
     count: number;
-    everyNTracks: number;
+    minTracks: number;
+    maxTracks: number;
     chance: number;
     fadeSec: number;
   };
@@ -99,15 +110,15 @@ export type StudioHealth = {
 
 export type QueuePreview = {
   upcoming: RadioNowPlaying[];
+  schedule: ScheduledTrack[];
+  nextUp: ScheduledTrack | null;
   reserved: string | null;
   queueRemaining: number;
 };
 
 export const STREAM_URL = "/api/radio/stream";
 
-/** Přímý Icecast stream — bez Next.js proxy, live edge. */
-export function getDirectStreamUrl(host?: string): string {
-  const h = host ?? (typeof window !== "undefined" ? window.location.hostname : "127.0.0.1");
-  const port = process.env.NEXT_PUBLIC_RADIO_STREAM_PORT ?? "8788";
-  return `http://${h}:${port}/stream`;
+/** @deprecated Stream jde přes Next.js proxy — použij fetchStreamUrl(). */
+export function getDirectStreamUrl(): string {
+  return STREAM_URL;
 }
