@@ -6,6 +6,43 @@ export type RadioNowPlaying = {
   year: string | null;
   thumbnail: string | null;
   durationSec?: number | null;
+  /** Skladba si přál posluchač. */
+  requested?: boolean;
+  /** Kdy skladba začala hrát (ISO) — pro výpis "co hrálo". */
+  startedAt?: string;
+  /** Věnování ze schváleného přání. */
+  dedication?: Dedication;
+};
+
+export type Dedication = { from: string | null; message: string | null };
+
+export type RequestStatus = "pending" | "approved" | "rejected" | "played" | "expired";
+
+/** Přání posluchače — čeká na moderátora, pak jde do fronty. */
+export type ListenerRequest = {
+  id: string;
+  uuid: string;
+  title: string;
+  artist: string;
+  thumbnail: string | null;
+  from: string | null;
+  message: string | null;
+  /** Vzkaz obsahoval sprosté slovo (je vyhvězdičkovaný). */
+  flagged: boolean;
+  status: RequestStatus;
+  createdAt: string;
+  decidedAt?: string;
+  playedAt?: string;
+};
+
+/** Co posluchač vidí o svém přání. */
+export type RequestStatusView = {
+  id: string;
+  status: RequestStatus;
+  title: string;
+  artist: string;
+  /** Pořadí ve frontě, když je schválené (1 = hraje jako další). */
+  position: number | null;
 };
 
 export type ScheduledTrack = RadioNowPlaying & {
@@ -18,7 +55,10 @@ export type ScheduledTrack = RadioNowPlaying & {
 
 export type ScheduledProgramItem = ScheduledTrack;
 
-export type PlaybackSegment = "song" | "crossfade" | "stinger";
+export type PlaybackSegment = "song" | "crossfade" | "stinger" | "talk";
+
+/** Pauza na mluvené slovo: none → armed (po skladbě) → on (hraje podkres). */
+export type BreakState = "none" | "armed" | "on";
 
 export type StationConfig = {
   name: string;
@@ -114,6 +154,31 @@ export type QueuePreview = {
   nextUp: ScheduledTrack | null;
   reserved: string | null;
   queueRemaining: number;
+};
+
+export type QueueItemSource = "prepared" | "request" | "rotation";
+
+/** Položka fronty ve studiu. */
+export type StudioQueueItem = RadioNowPlaying & {
+  source: QueueItemSource;
+  stingerBefore?: boolean;
+};
+
+export type LibraryStatsRow = {
+  uuid: string;
+  title: string;
+  artist: string;
+  thumbnail: string | null;
+  plays: number;
+  lastPlayedAt: string | null;
+  lufs: number | null;
+  broken: { reason: string; at: string } | null;
+};
+
+export type LibraryStats = {
+  rows: LibraryStatsRow[];
+  totalPlays: number;
+  libraryHours: number;
 };
 
 export const STREAM_URL = "/api/radio/stream";

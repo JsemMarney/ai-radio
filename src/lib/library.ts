@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import type { MixAnalysis } from "@/lib/mix-analysis";
 import type { SpotifyTrackMeta } from "@/lib/spotify";
 
 export type LibraryTrackStatus = "ready" | "failed" | "downloading";
@@ -38,6 +39,8 @@ export type LibraryTrack = {
   /** Délka po masteringu — používá DJ loop. */
   playDuration?: number | null;
   processedAt?: string | null;
+  /** Hlasitost a body pro mix (počítá engine, cache). */
+  mixAnalysis?: MixAnalysis | null;
   status: LibraryTrackStatus;
   error: string | null;
   createdAt: string;
@@ -53,7 +56,16 @@ export function getDownloadsDir(): string {
   return path.join(process.cwd(), "downloads");
 }
 
+const TRACK_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** ID skladby je vždy UUID — nic jiného nesmí skončit v cestě na disku. */
+export function isTrackId(value: unknown): value is string {
+  return typeof value === "string" && TRACK_ID_RE.test(value);
+}
+
 export function getTrackDir(uuid: string): string {
+  if (!isTrackId(uuid)) throw new Error("Neplatné ID skladby.");
   return path.join(getDownloadsDir(), uuid);
 }
 

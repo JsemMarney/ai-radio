@@ -2,7 +2,7 @@ import { open, readFile, rename, stat, unlink, writeFile } from "node:fs/promise
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { ensureDownloadsDir, getDownloadsDir } from "@/lib/library";
-import type { RadioNowPlaying } from "@/lib/types";
+import type { ListenerRequest, RadioNowPlaying } from "@/lib/types";
 
 export type { RadioNowPlaying };
 
@@ -17,8 +17,19 @@ export type PersistedRadioState = {
   playlistBag: string[];
   lastPlayedUuid: string | null;
   listenerRequests?: string[];
+  /** Historie pro rotaci (uuid, nejnovější první) — delší než recentlyPlayed. */
+  rotationHistory?: string[];
+  /** Kolikrát a kdy naposledy skladba hrála. */
+  playStats?: Record<string, TrackPlayStats>;
+  /** Skladby, které engine nedokázal přehrát (a proč). */
+  brokenTracks?: Record<string, BrokenTrackInfo>;
+  /** Přání posluchačů (nejnovější první) — i neschválená. */
+  requestLog?: ListenerRequest[];
   updatedAt: string;
 };
+
+export type TrackPlayStats = { plays: number; lastPlayedAt: string };
+export type BrokenTrackInfo = { reason: string; at: string };
 
 export function getMaxRecentTracks(): number {
   const raw = Number(process.env.RADIO_HISTORY_SIZE ?? 15);
@@ -160,6 +171,9 @@ const DEFAULT_STATE = (): PersistedRadioState => ({
   playlistBag: [],
   lastPlayedUuid: null,
   listenerRequests: [],
+  rotationHistory: [],
+  playStats: {},
+  brokenTracks: {},
   updatedAt: new Date().toISOString(),
 });
 
@@ -179,6 +193,9 @@ export async function readRadioState(): Promise<PersistedRadioState> {
         playlistBag: parsed.playlistBag ?? [],
         lastPlayedUuid: parsed.lastPlayedUuid ?? null,
         listenerRequests: parsed.listenerRequests ?? [],
+        rotationHistory: parsed.rotationHistory ?? [],
+        playStats: parsed.playStats ?? {},
+        brokenTracks: parsed.brokenTracks ?? {},
       };
     } catch {
       if (attempt < 2) await new Promise((r) => setTimeout(r, 25));
@@ -265,6 +282,20 @@ export async function writePlaylistState(
   await writeState({ ...existing, playlistBag, lastPlayedUuid });
 }
 
+/** Uloží frontu, requesty a historii rotace jedním zápisem. */
+export async function writeRotationState(patch: {
+  playlistBag?: string[];
+  listenerRequests?: string[];
+  rotationHistory?: string[];
+  lastPlayedUuid?: string | null;
+  playStats?: Record<string, TrackPlayStats>;
+  brokenTracks?: Record<string, BrokenTrackInfo>;
+  requestLog?: ListenerRequest[];
+}): Promise<void> {
+  const existing = await readRadioState();
+  await writeState({ ...existing, ...patch });
+}
+
 export async function writeListenerRequestQueue(uuids: string[]): Promise<void> {
   const existing = await readRadioState();
   await writeState({ ...existing, listenerRequests: uuids });
@@ -308,6 +339,8 @@ export async function updateNowPlaying(
     addPreviousToRecent?: RadioNowPlaying;
     /** Nový začátek skladby — při startu přehrávání, ne při metadata refreshi. */
     restartTrackClock?: boolean;
+    /** Explicitní čas startu (např. při navázání uprostřed skladby). */
+    trackStartedAt?: string;
   },
 ): Promise<PersistedRadioState> {
   const existing = await readRadioState();
@@ -315,6 +348,8 @@ export async function updateNowPlaying(
   let trackStartedAt: string | null;
   if (!nowPlaying) {
     trackStartedAt = null;
+  } else if (options?.trackStartedAt) {
+    trackStartedAt = options.trackStartedAt;
   } else if (options?.atCrossfade || options?.restartTrackClock) {
     trackStartedAt = new Date().toISOString();
   } else if (

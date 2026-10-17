@@ -1,21 +1,20 @@
 @import "tailwindcss";
 
 :root {
-  --bg-deep: #080b09;
-  --bg-mid: #0e1411;
-  --bg-panel: #141c18;
-  --bg-elevated: #1a2420;
-  --ink: #eef2ee;
-  --ink-muted: #7d9184;
-  --accent: #d4a24c;
-  --accent-soft: #e8c57a;
-  --line: rgba(238, 242, 238, 0.07);
-  --line-strong: rgba(238, 242, 238, 0.14);
-  --danger: #f25555;
-  --danger-glow: rgba(242, 85, 85, 0.4);
-  --ok: #5ecf73;
-  --glow-accent: color-mix(in srgb, var(--accent) 22%, transparent);
-  --glow-danger: color-mix(in srgb, var(--danger) 30%, transparent);
+  --bg-deep: #120b0a;
+  --bg-mid: #1b1110;
+  --bg-panel: #241614;
+  --bg-elevated: #2e1c19;
+  --ink: #f4ece2;
+  --ink-muted: #b09c92;
+  --ink-faint: #76635b;
+  --accent: #e5322d;
+  --accent-soft: #ff6b55;
+  --line: rgba(244, 236, 226, 0.09);
+  --line-strong: rgba(244, 236, 226, 0.2);
+  --danger: #ff6b55;
+  --on-air: #e5322d;
+  --ok: #8fd19e;
 }
 
 @theme inline {
@@ -30,32 +29,23 @@ body {
   margin: 0;
   min-height: 100vh;
   color: var(--ink);
+  background: var(--bg-deep);
   font-family: var(--font-sans), system-ui, sans-serif;
-  background:
-    radial-gradient(ellipse 70% 50% at 50% -10%, var(--glow-accent), transparent 55%),
-    radial-gradient(ellipse 40% 30% at 100% 20%, rgba(50, 80, 60, 0.12), transparent 50%),
-    linear-gradient(165deg, var(--bg-deep) 0%, var(--bg-mid) 50%, #0a0d0b 100%);
-  background-attachment: fixed;
 }
 
 * {
   box-sizing: border-box;
 }
 
-.broadcast-grain::before {
-  content: "";
-  pointer-events: none;
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  opacity: 0.025;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+::selection {
+  background: var(--accent);
+  color: var(--bg-deep);
 }
 
 @keyframes fade-up {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
@@ -63,153 +53,194 @@ body {
   }
 }
 
-@keyframes live-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.55;
-    transform: scale(0.85);
-  }
-}
-
-@keyframes wave-bar {
-  0%,
-  100% {
-    transform: scaleY(0.25);
-    opacity: 0.45;
-  }
-  50% {
-    transform: scaleY(1);
-    opacity: 1;
-  }
-}
-
 .animate-fade-up {
-  animation: fade-up 0.4s ease-out both;
+  animation: fade-up 0.25s ease-out both;
 }
 
-.live-dot {
-  animation: live-pulse 2s ease-in-out infinite;
+/* ON AIR lampa */
+.on-air {
+  font-family: var(--font-display), sans-serif;
+  letter-spacing: 0.14em;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-faint);
+  transition: background 0.3s, color 0.3s, border-color 0.3s;
 }
 
-.wave-bar {
-  transform-origin: bottom;
-  animation: wave-bar 0.9s ease-in-out infinite;
+.on-air.is-live {
+  background: var(--on-air);
+  border-color: var(--on-air);
+  color: #fff;
 }
 
-.wave-bar:nth-child(2) { animation-delay: 0.1s; }
-.wave-bar:nth-child(3) { animation-delay: 0.2s; }
-.wave-bar:nth-child(4) { animation-delay: 0.05s; }
-.wave-bar:nth-child(5) { animation-delay: 0.15s; }
-.wave-bar:nth-child(6) { animation-delay: 0.25s; }
-.wave-bar:nth-child(7) { animation-delay: 0.08s; }
-
-.wave-idle .wave-bar {
-  animation: none;
-  transform: scaleY(0.2);
-  opacity: 0.3;
+/* Popisky sekcí */
+.label::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  vertical-align: 1px;
+  background: var(--accent);
 }
 
-/* Now playing hero */
-.now-playing-hero {
-  background: var(--bg-panel);
-  box-shadow:
-    0 0 0 1px var(--line),
-    0 24px 48px rgba(0, 0, 0, 0.35);
+.label {
+  font-family: var(--font-display), sans-serif;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
 }
 
-.album-art-shadow {
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.45),
-    0 0 0 1px rgba(255, 255, 255, 0.06);
-}
-
-/* Play button */
-.btn-play {
-  background: linear-gradient(145deg, var(--accent-soft) 0%, var(--accent) 100%);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-}
-
-.btn-play:hover {
-  transform: scale(1.05);
-  box-shadow: 0 0 28px var(--glow-accent);
-}
-
-.btn-play:active {
-  transform: scale(0.96);
-}
-
-/* Volume slider */
+/* Hlasitost */
 input[type="range"].broadcast-range {
   -webkit-appearance: none;
   appearance: none;
-  height: 4px;
-  border-radius: 999px;
+  height: 2px;
   background: var(--line-strong);
+  cursor: pointer;
 }
 
 input[type="range"].broadcast-range::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 10px var(--glow-accent);
-  cursor: pointer;
+  background: var(--ink);
 }
 
 input[type="range"].broadcast-range::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border: none;
   border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
+  background: var(--ink);
 }
 
-/* Program log */
-.program-log-row {
-  background: transparent;
-  transition: background 0.15s ease;
+/* Ekvalizér v "právě hraje" — jen když opravdu hraje */
+@keyframes level {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
 }
 
-.program-log-row:hover {
-  background: rgba(255, 255, 255, 0.03);
+.level-bar {
+  transform-origin: bottom;
+  transform: scaleY(0.3);
 }
 
-.program-log-row.is-next {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+.is-playing .level-bar {
+  animation: level 0.8s ease-in-out infinite;
 }
 
-.program-log-row.is-recent {
-  opacity: 0.65;
+.is-playing .level-bar:nth-child(2) {
+  animation-duration: 0.65s;
+  animation-delay: 0.1s;
 }
 
-/* Timeline */
-.timeline-crossfade-zone {
-  background: linear-gradient(
+.is-playing .level-bar:nth-child(3) {
+  animation-duration: 0.9s;
+  animation-delay: 0.2s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-playing .level-bar,
+  .animate-fade-up {
+    animation: none;
+  }
+}
+
+/* Běžící pás nahoře — jako titulky na obrazovce rádia */
+@keyframes ticker {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.ticker-track {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: ticker 40s linear infinite;
+}
+
+.ticker:hover .ticker-track {
+  animation-play-state: paused;
+}
+
+/* Stupnice ladění — průběh skladby jako ručička na rádiu */
+.dial {
+  background-image: repeating-linear-gradient(
     90deg,
-    transparent 0%,
-    color-mix(in srgb, var(--accent) 12%, transparent) 100%
+    var(--line-strong) 0 1px,
+    transparent 1px 10%
+  ),
+  repeating-linear-gradient(
+    90deg,
+    var(--line) 0 1px,
+    transparent 1px 2%
   );
+  background-position: 0 0, 0 50%;
+  background-size: 100% 100%, 100% 50%;
+  background-repeat: no-repeat;
 }
 
-.timeline-progress {
-  background: linear-gradient(90deg, var(--accent-soft), var(--accent));
+.dial-needle {
+  transition: left 0.5s linear;
 }
 
-.timeline-progress.is-crossfade {
-  background: linear-gradient(90deg, var(--accent), #e8a87c);
-  box-shadow: 0 0 12px var(--glow-accent);
+/* Obal s plnou červenou deskou za sebou */
+.cover-plate {
+  position: relative;
 }
 
-.timeline-progress.is-stinger {
-  background: linear-gradient(90deg, #9b7bd4, var(--accent));
+.cover-plate::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translate(12px, 12px);
+  border: 2px solid var(--accent);
+  border-radius: 4px;
 }
 
-.next-up-banner {
-  box-shadow: 0 0 0 1px var(--line);
+.cover-plate > * {
+  position: relative;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track {
+    animation: none;
+  }
+}
+
+.label.no-mark::before {
+  display: none;
+}
+
+/* "Právě hraje" zůstane na místě při scrollu — jen když se celé vejde na výšku */
+@media (min-width: 1024px) and (min-height: 900px) {
+  .hero-sticky {
+    position: sticky;
+    top: 2.5rem;
+  }
+}
+
+@keyframes live-mic {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.live-mic {
+  animation: live-mic 1.4s ease-in-out infinite;
 }

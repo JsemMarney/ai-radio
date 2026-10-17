@@ -2,6 +2,11 @@ import { listTracksWithAudio } from "@/lib/library";
 import { readRadioState, writeListenerRequestQueue } from "@/lib/radio-state";
 import type { RadioNowPlaying } from "@/lib/types";
 
+/** Přání musí schválit moderátor (výchozí). RADIO_REQUESTS_MODERATION=0 = rovnou do fronty. */
+export function isRequestModerationEnabled(): boolean {
+  return process.env.RADIO_REQUESTS_MODERATION !== "0";
+}
+
 export function areSongRequestsEnabled(): boolean {
   const flag = process.env.RADIO_REQUESTS?.trim().toLowerCase();
   return flag === "1" || flag === "true" || flag === "on";

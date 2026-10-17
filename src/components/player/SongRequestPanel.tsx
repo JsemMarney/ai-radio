@@ -1,141 +1,288 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import type { RadioNowPlaying } from "@/lib/types";
+import { type FormEvent, useCallback, useEffect, useState } from "react";
+import type { RadioNowPlaying, RequestStatusView } from "@/lib/types";
+import { Cover, LogRow } from "@/components/player/BroadcastUi";
+
+const MY_REQUESTS_KEY = "ai-radio-my-requests";
+const FROM_KEY = "ai-radio-request-from";
+
+type Stored = { id: string; at: number };
+
+function readMine(): Stored[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MY_REQUESTS_KEY) ?? "[]") as Stored[];
+    const dayAgo = Date.now() - 24 * 3600 * 1000;
+    return raw.filter((r) => r && typeof r.id === "string" && r.at > dayAgo).slice(0, 10);
+  } catch {
+    return [];
+  }
+}
+
+function saveMine(list: Stored[]): void {
+  try {
+    localStorage.setItem(MY_REQUESTS_KEY, JSON.stringify(list.slice(0, 10)));
+  } catch {
+    // storage nedostupný
+  }
+}
+
+function statusText(r: RequestStatusView): { text: string; tone: "wait" | "ok" | "no" } {
+  switch (r.status) {
+    case "pending":
+      return { text: "čeká na moderátora", tone: "wait" };
+    case "approved":
+      return {
+        text: r.position === 1 ? "schváleno — hraje jako další" : r.position ? `schváleno — ${r.position}. v pořadí` : "schváleno",
+        tone: "ok",
+      };
+    case "played":
+      return { text: "zaznělo", tone: "ok" };
+    case "rejected":
+      return { text: "tentokrát ne", tone: "no" };
+    default:
+      return { text: "moderátor nestihl", tone: "no" };
+  }
+}
 
 export function SongRequestPanel() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [query, setQuery] = useState("");
   const [tracks, setTracks] = useState<RadioNowPlaying[]>([]);
-  const [pending, setPending] = useState(0);
-  const [busyUuid, setBusyUuid] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [selected, setSelected] = useState<RadioNowPlaying | null>(null);
+  const [from, setFrom] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [mine, setMine] = useState<Stored[]>([]);
+  const [statuses, setStatuses] = useState<RequestStatusView[]>([]);
 
-  const load = useCallback(async (search = query) => {
+  const load = useCallback(async (search: string) => {
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({ limit: "30" });
       if (search.trim()) params.set("search", search.trim());
       const res = await fetch(`/api/radio/requests?${params}`, { cache: "no-store" });
-      const data = (await res.json()) as {
-        enabled?: boolean;
-        tracks?: RadioNowPlaying[];
-        pending?: number;
-      };
+      const data = (await res.json()) as { enabled?: boolean; tracks?: RadioNowPlaying[] };
       setEnabled(Boolean(data.enabled));
       setTracks(data.tracks ?? []);
-      setPending(data.pending ?? 0);
     } catch {
       setEnabled(false);
     }
-  }, [query]);
+  }, []);
 
   useEffect(() => {
-    void load("");
-  }, [load]);
-
-  useEffect(() => {
-    const timer = setTimeout(() => void load(query), 300);
+    const timer = setTimeout(() => void load(query), query ? 250 : 0);
     return () => clearTimeout(timer);
   }, [query, load]);
 
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setMine(readMine());
+      try {
+        setFrom(localStorage.getItem(FROM_KEY) ?? "");
+      } catch {
+        // storage nedostupný
+      }
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Stav vlastních přání — dokud nějaké čeká nebo jde na řadu.
+  useEffect(() => {
+    if (!mine.length) return;
+    let stop = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `/api/radio/requests/status?ids=${mine.map((m) => m.id).join(",")}`,
+          { cache: "no-store" },
+        );
+        const data = (await res.json()) as { requests?: RequestStatusView[] };
+        if (!stop) setStatuses(data.requests ?? []);
+      } catch {
+        // offline
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 10_000);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
+  }, [mine]);
+
   if (enabled === false) return null;
 
-  async function requestTrack(uuid: string) {
-    setBusyUuid(uuid);
-    setMessage(null);
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!selected) return;
+    setBusy(true);
+    setFeedback(null);
     try {
       const res = await fetch("/api/radio/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uuid }),
+        body: JSON.stringify({ uuid: selected.uuid, from, message: note }),
       });
-      const data = (await res.json()) as {
-        ok?: boolean;
-        error?: string;
-        position?: number;
-      };
-      if (data.ok) {
-        setMessage(
-          data.position
-            ? `Přidáno do fronty requestů (#${data.position}).`
-            : "Přidáno do fronty requestů.",
-        );
+      const data = (await res.json()) as { ok?: boolean; error?: string; id?: string; status?: string };
+      if (data.ok && data.id) {
+        const next = [{ id: data.id, at: Date.now() }, ...mine];
+        saveMine(next);
+        setMine(next);
+        try {
+          localStorage.setItem(FROM_KEY, from.trim());
+        } catch {
+          // storage nedostupný
+        }
+        setFeedback({
+          ok: true,
+          text:
+            data.status === "pending"
+              ? "Díky! Přání čeká, až ho moderátor schválí."
+              : "Díky! Přání je ve frontě.",
+        });
+        setSelected(null);
+        setNote("");
         void load(query);
       } else {
-        setMessage(data.error ?? "Request selhal.");
+        setFeedback({ ok: false, text: data.error ?? "Přání se nepodařilo odeslat." });
       }
     } catch {
-      setMessage("Request selhal — stanice offline?");
+      setFeedback({ ok: false, text: "Stanice teď neodpovídá." });
     } finally {
-      setBusyUuid(null);
+      setBusy(false);
     }
   }
 
   return (
-    <section className="rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/80 p-5">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <h2 className="text-sm font-medium text-[var(--ink-muted)]">
-          Request skladby
-        </h2>
-        {pending > 0 ? (
-          <span className="text-[10px] text-[var(--accent-soft)]">
-            {pending} ve frontě
-          </span>
-        ) : null}
-      </div>
-      <input
-        type="search"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Hledat interpreta nebo název…"
-        className="mb-3 w-full rounded-xl border border-[var(--line)] bg-[var(--bg-deep)] px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)]"
-      />
-      {message ? (
-        <p className="mb-3 text-xs text-[var(--accent-soft)]">{message}</p>
+    <section>
+      <h2 className="label mb-3">Přání</h2>
+
+      {statuses.length ? (
+        <div className="mb-6">
+          <p className="mb-1 text-xs text-[var(--ink-muted)]">Tvoje přání</p>
+          <ul>
+            {statuses.map((r) => {
+              const s = statusText(r);
+              return (
+                <li
+                  key={r.id}
+                  className="flex items-center justify-between gap-3 border-t border-[var(--line)] py-2 text-sm first:border-t-0"
+                >
+                  <span className="min-w-0 truncate">
+                    {r.title} <span className="text-[var(--ink-muted)]">— {r.artist}</span>
+                  </span>
+                  <span
+                    className={`shrink-0 text-xs ${
+                      s.tone === "ok"
+                        ? "text-[var(--ok)]"
+                        : s.tone === "no"
+                          ? "text-[var(--ink-faint)]"
+                          : "text-[var(--accent)]"
+                    }`}
+                  >
+                    {s.text}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       ) : null}
-      <ul className="max-h-56 space-y-1 overflow-y-auto">
-        {tracks.length ? (
-          tracks.map((track) => (
-            <li
-              key={track.uuid}
-              className="flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-[var(--bg-elevated)]/60"
+
+      {selected ? (
+        <form onSubmit={submit} className="border border-[var(--line-strong)] p-4">
+          <div className="flex items-center gap-3">
+            <Cover src={selected.thumbnail} size="sm" className="rounded-[2px]" />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm">{selected.title}</p>
+              <p className="truncate text-xs text-[var(--ink-muted)]">{selected.artist}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelected(null)}
+              className="text-xs text-[var(--ink-muted)] hover:text-[var(--ink)]"
             >
-              {track.thumbnail ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={track.thumbnail}
-                  alt=""
-                  className="h-9 w-9 shrink-0 rounded-lg object-cover"
+              Zpět
+            </button>
+          </div>
+          <label className="mt-4 block text-xs text-[var(--ink-muted)]">
+            Od koho <span className="text-[var(--ink-faint)]">(nepovinné)</span>
+            <input
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              maxLength={40}
+              placeholder="Martin"
+              className="mt-1 block w-full border-b border-[var(--line-strong)] bg-transparent py-1.5 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
+            />
+          </label>
+          <label className="mt-4 block text-xs text-[var(--ink-muted)]">
+            Vzkaz do éteru <span className="text-[var(--ink-faint)]">(nepovinné, {200 - note.length} znaků)</span>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value.slice(0, 200))}
+              rows={3}
+              placeholder="Pro Petru, ať se jí daří na zkoušce!"
+              className="mt-1 block w-full resize-none border-b border-[var(--line-strong)] bg-transparent py-1.5 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
+            />
+          </label>
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <p className="text-xs text-[var(--ink-faint)]">Přání nejdřív uvidí moderátor.</p>
+            <button
+              type="submit"
+              disabled={busy}
+              className="shrink-0 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--accent-soft)] disabled:opacity-50"
+            >
+              {busy ? "Posílám…" : "Poslat přání"}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Interpret nebo název skladby"
+            className="w-full border-b border-[var(--line-strong)] bg-transparent py-2 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
+          />
+          <ul className="mt-2 max-h-72 overflow-y-auto pr-1">
+            {tracks.length ? (
+              tracks.map((track) => (
+                <LogRow
+                  key={track.uuid}
+                  track={track}
+                  aside={
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelected(track);
+                        setFeedback(null);
+                      }}
+                      className="shrink-0 rounded-full border border-[var(--line-strong)] px-3 py-1 text-xs text-[var(--ink)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                    >
+                      Přát si
+                    </button>
+                  }
                 />
-              ) : (
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--bg-elevated)] text-xs">
-                  ♪
-                </span>
-              )}
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-[var(--ink)]">
-                  {track.title}
-                </p>
-                <p className="truncate text-xs text-[var(--ink-muted)]">
-                  {track.artist}
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={busyUuid === track.uuid}
-                onClick={() => void requestTrack(track.uuid)}
-                className="shrink-0 rounded-lg bg-[var(--accent)]/15 px-2.5 py-1 text-[10px] font-medium text-[var(--accent-soft)] disabled:opacity-50"
-              >
-                {busyUuid === track.uuid ? "…" : "Request"}
-              </button>
-            </li>
-          ))
-        ) : (
-          <li className="py-4 text-center text-xs text-[var(--ink-muted)]">
-            {enabled === null ? "Načítám…" : "Nic nenalezeno."}
-          </li>
-        )}
-      </ul>
+              ))
+            ) : (
+              <li className="py-6 text-center text-sm text-[var(--ink-muted)]">
+                {enabled === null ? "Načítám…" : "Nic jsme nenašli."}
+              </li>
+            )}
+          </ul>
+        </>
+      )}
+
+      {feedback ? (
+        <p
+          className={`mt-3 text-sm ${feedback.ok ? "text-[var(--ok)]" : "text-[var(--danger)]"}`}
+          role="status"
+        >
+          {feedback.text}
+        </p>
+      ) : null}
     </section>
   );
 }

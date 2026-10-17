@@ -10,8 +10,8 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  BreakState,
   PlaybackSegment,
-  QueuePreview,
   RadioNowPlaying,
   ScheduledTrack,
 } from "@/lib/types";
@@ -25,41 +25,71 @@ function recentKey(tracks: RadioNowPlaying[]): string {
 const VOLUME_KEY = "ai-radio-volume";
 const DEFAULT_VOLUME = 0.85;
 
-let cachedStreamUrl = "";
-let cachedStreamExpiresAt = 0;
+type StreamFormat = "mp3" | "aac";
+export type StreamQuality = "auto" | "high" | "low";
+
+const QUALITY_KEY = "ai-radio-quality";
+
+/** Formát, který si přehrávač právě vybral (sdílí ho resolveStreamUrl). */
+let activeFormat: StreamFormat = "mp3";
+const streamUrlCache = new Map<StreamFormat, { url: string; expiresAt: number }>();
 
 function withStreamCacheBust(url: string): string {
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}_=${Date.now()}`;
 }
 
-async function resolveStreamUrl(): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  if (cachedStreamUrl && cachedStreamExpiresAt > now + 120) {
-    return cachedStreamUrl;
-  }
+function invalidateStreamUrls(): void {
+  streamUrlCache.clear();
+}
 
+async function resolveStreamUrl(): Promise<string> {
+  const format = activeFormat;
+  const now = Math.floor(Date.now() / 1000);
+  const cached = streamUrlCache.get(format);
+  if (cached && cached.expiresAt > now + 120) return cached.url;
+
+  const fallback = format === "aac" ? `${STREAM_URL}?format=aac` : STREAM_URL;
   try {
-    const res = await fetch("/api/radio/stream-url", { cache: "no-store" });
-    if (!res.ok) return STREAM_URL;
+    const res = await fetch(
+      `/api/radio/stream-url${format === "aac" ? "?format=aac" : ""}`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return fallback;
     const data = (await res.json()) as {
       url?: string;
       expiresAt?: number | null;
       signed?: boolean;
     };
     if (data.url) {
-      cachedStreamUrl = data.url;
-      cachedStreamExpiresAt =
-        data.signed && data.expiresAt ? data.expiresAt : now + 86400;
-      return cachedStreamUrl;
+      streamUrlCache.set(format, {
+        url: data.url,
+        expiresAt: data.signed && data.expiresAt ? data.expiresAt : now + 86400,
+      });
+      return data.url;
     }
   } catch {
     // fallback na přímý proxy stream
   }
+  streamUrlCache.set(format, { url: fallback, expiresAt: now + 86400 });
+  return fallback;
+}
 
-  cachedStreamUrl = STREAM_URL;
-  cachedStreamExpiresAt = now + 86400;
-  return STREAM_URL;
+/** Slabé připojení / úspora dat / telefon → úspornější AAC. */
+function prefersLightStream(): boolean {
+  if (typeof window === "undefined") return false;
+  const conn = (navigator as Navigator & {
+    connection?: { saveData?: boolean; effectiveType?: string };
+  }).connection;
+  if (conn?.saveData) return true;
+  if (conn?.effectiveType && /(^|-)(2g|3g)$/.test(conn.effectiveType)) return true;
+  return window.matchMedia?.("(pointer: coarse)").matches ?? false;
+}
+
+function readStoredQuality(): StreamQuality {
+  if (typeof window === "undefined") return "auto";
+  const raw = localStorage.getItem(QUALITY_KEY);
+  return raw === "high" || raw === "low" ? raw : "auto";
 }
 
 function readStoredVolume(): number {
@@ -93,6 +123,18 @@ type RadioContextValue = {
   statusReady: boolean;
   volume: number;
   setVolume: (value: number) => void;
+  quality: StreamQuality;
+  setQuality: (value: StreamQuality) => void;
+  /** Co se právě přehrává — např. "AAC 96 kbps". */
+  streamLabel: string;
+  aacAvailable: boolean;
+  /** Moderátor mluví do vysílání. */
+  micLive: boolean;
+  /** Přání čekající na moderátora (pro studio). */
+  moderationPending: number;
+  breakState: BreakState;
+  bed: string;
+  bedLevelDb: number;
   play: () => void;
   pause: () => void;
   toggle: () => void;
@@ -120,6 +162,12 @@ type StatusPayload = {
   midsongConfigured?: boolean;
   midsongMinTracks?: number;
   midsongMaxTracks?: number;
+  formats?: { mp3: number; aac: number | null };
+  micLive?: boolean;
+  moderationPending?: number;
+  breakState?: BreakState;
+  bed?: string;
+  bedLevelDb?: number;
 };
 
 const CONNECTION_DEBOUNCE_MS = 800;
@@ -129,7 +177,6 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const recentKeyRef = useRef("");
   const trackUuidRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
-  const streamEpochRef = useRef(0);
   const [statusReady, setStatusReady] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<RadioNowPlaying | null>(null);
@@ -154,6 +201,16 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const [connection, setConnection] = useState<ConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [volume, setVolumeState] = useState(DEFAULT_VOLUME);
+  const [micLive, setMicLive] = useState(false);
+  const [moderationPending, setModerationPending] = useState(0);
+  const [breakState, setBreakState] = useState<BreakState>("none");
+  const [bed, setBed] = useState("builtin");
+  const [bedLevelDb, setBedLevelDb] = useState(-10);
+  const [quality, setQualityState] = useState<StreamQuality>("auto");
+  const [formats, setFormats] = useState<{ mp3: number; aac: number | null }>({
+    mp3: 0,
+    aac: null,
+  });
 
   const setVolume = useCallback((value: number) => {
     const next = Math.min(1, Math.max(0, value));
@@ -166,36 +223,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const loadQueue = useCallback(async () => {
-    try {
-      const res = await fetch("/api/radio/queue?limit=5", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = (await res.json()) as QueuePreview;
-      setUpcoming(data.upcoming ?? []);
-      if (data.queueRemaining !== undefined) {
-        setQueueRemaining(data.queueRemaining);
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
   const applyStatus = useCallback((data: StatusPayload) => {
-    if (data.streamEpoch !== undefined && data.streamEpoch !== streamEpochRef.current) {
-      const hadEpoch = streamEpochRef.current > 0;
-      streamEpochRef.current = data.streamEpoch;
-      if (hadEpoch) {
-        const el = audioRef.current;
-        if (el && !el.paused) {
-          void resolveStreamUrl().then((url) => {
-            el.src = withStreamCacheBust(url);
-            el.load();
-            void el.play().catch(() => {});
-          });
-        }
-      }
-    }
-
     if (data.sessionId !== undefined && data.sessionId !== sessionIdRef.current) {
       const hadSession = sessionIdRef.current !== null;
       sessionIdRef.current = data.sessionId;
@@ -256,13 +284,26 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     if (data.midsongMaxTracks !== undefined) {
       setMidsongMaxTracks(data.midsongMaxTracks);
     }
+    if (data.micLive !== undefined) setMicLive(data.micLive);
+    if (data.moderationPending !== undefined) setModerationPending(data.moderationPending);
+    if (data.breakState !== undefined) setBreakState(data.breakState);
+    if (data.bed !== undefined) setBed(data.bed);
+    if (data.bedLevelDb !== undefined) setBedLevelDb(data.bedLevelDb);
+    if (data.formats) {
+      const f = data.formats;
+      setFormats((prev) =>
+        prev.mp3 === f.mp3 && prev.aac === f.aac ? prev : f,
+      );
+    }
   }, []);
 
   useEffect(() => {
-    setVolumeState(readStoredVolume());
-    if (typeof window !== "undefined") {
+    // Až po mountu — localStorage na serveru není (a hydratace musí sedět).
+    const restore = setTimeout(() => {
+      setVolumeState(readStoredVolume());
+      setQualityState(readStoredQuality());
       setShareUrl(`${window.location.origin}/player`);
-    }
+    }, 0);
 
     void resolveStreamUrl().then((url) => {
       setStreamUrl(url);
@@ -275,15 +316,8 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         setStatusReady(true);
       })
       .catch(() => setStatusReady(true));
+    return () => clearTimeout(restore);
   }, [applyStatus]);
-
-  useEffect(() => {
-    if (!statusReady) return;
-    void loadQueue();
-    const pollMs = playing ? 4_000 : 8_000;
-    const timer = setInterval(() => void loadQueue(), pollMs);
-    return () => clearInterval(timer);
-  }, [statusReady, loadQueue, nowPlaying?.uuid, playing]);
 
   useEffect(() => {
     const recompute = () => {
@@ -296,15 +330,18 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         stingerEveryAvg: (midsongMinTracks + midsongMaxTracks) / 2,
         stingerSec: midsongDurationSec,
         showStingers: midsongConfigured,
-        stingerLabel: "Midsong",
+        stingerLabel: "Jingle",
       });
       setSchedule(sliceScheduleForDisplay(live, 5));
       setNextUp(pickNextScheduleTrack(live));
     };
 
-    recompute();
+    const first = setTimeout(recompute, 0);
     const timer = setInterval(recompute, 1_000);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
   }, [
     nowPlaying,
     trackStartedAt,
@@ -461,6 +498,41 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     });
   }, [connectStream]);
 
+  // Vybrat formát podle nastavení kvality a toho, co stanice umí.
+  const wantsLight =
+    quality === "low" || (quality === "auto" && prefersLightStream());
+  const format: StreamFormat = wantsLight && formats.aac ? "aac" : "mp3";
+
+  useEffect(() => {
+    if (format === activeFormat) return;
+    activeFormat = format;
+    const el = audioRef.current;
+    if (el && !el.paused) {
+      void resolveStreamUrl().then((url) => {
+        setStreamUrl(url);
+        el.src = withStreamCacheBust(url);
+        el.load();
+        void el.play().catch(() => {});
+      });
+    }
+  }, [format]);
+
+  const setQuality = useCallback((value: StreamQuality) => {
+    setQualityState(value);
+    try {
+      localStorage.setItem(QUALITY_KEY, value);
+    } catch {
+      // storage nedostupný
+    }
+  }, []);
+
+  const streamLabel =
+    format === "aac" && formats.aac
+      ? `AAC ${formats.aac} kbps`
+      : formats.mp3
+        ? `MP3 ${formats.mp3} kbps`
+        : "";
+
   const pause = useCallback(() => {
     audioRef.current?.pause();
   }, []);
@@ -481,9 +553,8 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     setError(null);
     setConnection("reconnecting");
     el.pause();
-    cachedStreamExpiresAt = 0;
+    invalidateStreamUrls();
     void resolveStreamUrl().then((url) => {
-      cachedStreamExpiresAt = 0;
       setStreamUrl(url);
       el.src = withStreamCacheBust(url);
       el.load();
@@ -517,6 +588,15 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         statusReady,
         volume,
         setVolume,
+        quality,
+        setQuality,
+        streamLabel,
+        aacAvailable: formats.aac !== null,
+        micLive,
+        moderationPending,
+        breakState,
+        bed,
+        bedLevelDb,
         play,
         pause,
         toggle,

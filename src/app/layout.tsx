@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { connection } from "next/server";
 import type { CSSProperties } from "react";
 import { Barlow, Barlow_Condensed, IBM_Plex_Mono } from "next/font/google";
 import { RadioProvider } from "@/components/RadioProvider";
@@ -31,7 +32,9 @@ export const metadata: Metadata = {
   description: station.tagline,
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  // Dynamické renderování — jinak by Next nemohl doplnit CSP nonce ke skriptům.
+  await connection();
   return (
     <html
       lang="cs"

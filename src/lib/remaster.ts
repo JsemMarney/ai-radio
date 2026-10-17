@@ -181,7 +181,7 @@ async function runRemasterJob(jobId: string, force: boolean): Promise<void> {
     await saveJob(job);
   }
 
-  let job = await getRemasterJob(jobId);
+  const job = await getRemasterJob(jobId);
   if (!job) return;
   job.status = job.failed === job.total ? "failed" : "done";
   job.current = null;

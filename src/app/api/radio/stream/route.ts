@@ -29,7 +29,8 @@ export async function GET(request: Request) {
     });
   }
 
-  const res = await brokerStream("/stream");
+  const format = url.searchParams.get("format") === "aac" ? "aac" : "mp3";
+  const res = await brokerStream(format === "aac" ? "/stream.aac" : "/stream");
   if (!res.ok || !res.body) {
     return new Response("Rádio stream není dostupný. Spusť broadcaster.", {
       status: 503,

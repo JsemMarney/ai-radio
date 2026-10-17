@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { deleteLibraryTrack, getTrack } from "@/lib/library";
+import { deleteLibraryTrack, getTrack, isTrackId } from "@/lib/library";
 import { brokerFetch } from "@/lib/radio-broker";
 import { readRadioState, writePlaylistState } from "@/lib/radio-state";
 
@@ -36,8 +36,8 @@ export async function DELETE(
   try {
     const { uuid } = await context.params;
     const trimmed = uuid?.trim();
-    if (!trimmed) {
-      return NextResponse.json({ error: "Chybí uuid." }, { status: 400 });
+    if (!isTrackId(trimmed)) {
+      return NextResponse.json({ error: "Neplatné uuid." }, { status: 400 });
     }
 
     const track = await getTrack(trimmed);

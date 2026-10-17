@@ -35,38 +35,38 @@ export default function StudioLoginPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-10">
-      <h1 className="font-[family-name:var(--font-display)] text-3xl text-[var(--ink)]">
-        Studio přihlášení
+    <main className="mx-auto flex min-h-screen w-full max-w-sm flex-col justify-center px-4 py-10">
+      <p className="label">Studio</p>
+      <h1 className="mt-2 font-[family-name:var(--font-display)] text-4xl font-semibold leading-none text-[var(--ink)]">
+        Přihlášení
       </h1>
-      <p className="mt-2 text-sm text-[var(--ink-muted)]">
-        Import a správa knihovny jsou chráněné heslem.
-      </p>
 
-      <form
-        onSubmit={onSubmit}
-        className="mt-8 rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/80 p-5"
-      >
-        <label
-          htmlFor="password"
-          className="mb-2 block text-sm text-[var(--ink-muted)]"
-        >
+      {searchParams.get("error") === "config" ? (
+        <p className="mt-6 text-sm text-[var(--danger)]" role="alert">
+          Studio je zamčené: heslo ve STUDIO_PASSWORD chybí nebo je slabé
+          (min. 12 znaků). Nastav ho v .env.local a restartuj server.
+        </p>
+      ) : null}
+
+      <form onSubmit={onSubmit} className="mt-10">
+        <label htmlFor="password" className="text-xs text-[var(--ink-muted)]">
           Heslo
         </label>
         <input
           id="password"
           type="password"
           required
+          autoFocus
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg-deep)]/70 px-4 py-3 text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+          className="mt-1 w-full border-b border-[var(--line-strong)] bg-transparent py-2 text-[var(--ink)] outline-none focus:border-[var(--accent)]"
         />
         <button
           type="submit"
           disabled={loading}
-          className="mt-4 w-full rounded-xl bg-[var(--accent)] py-3 text-sm font-semibold text-[var(--bg-deep)] disabled:opacity-50"
+          className="mt-8 w-full rounded-full bg-[var(--accent)] py-2.5 text-sm font-medium text-[var(--bg-deep)] transition-colors hover:bg-[var(--accent-soft)] disabled:opacity-50"
         >
-          {loading ? "Přihlašuju…" : "Přihlásit"}
+          {loading ? "Přihlašuji…" : "Vstoupit"}
         </button>
       </form>
 

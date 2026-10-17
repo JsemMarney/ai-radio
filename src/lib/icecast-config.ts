@@ -29,7 +29,27 @@ export function getIcecastMount(): string {
 }
 
 export function getIcecastSourcePassword(): string {
-  return process.env.ICECAST_SOURCE_PASSWORD?.trim() || "hackme";
+  return process.env.ICECAST_SOURCE_PASSWORD?.trim() || "";
+}
+
+export function getIcecastRelayPassword(): string {
+  return (
+    process.env.ICECAST_RELAY_PASSWORD?.trim() || getIcecastSourcePassword()
+  );
+}
+
+const WEAK_ICECAST_PASSWORDS = new Set(["", "hackme", "admin", "password", "changeme", "change-me"]);
+
+/** Vrátí popis problému, když Icecast hesla chybí nebo jsou výchozí. */
+export function getIcecastSecretProblem(): string | null {
+  const weak = (v: string) => WEAK_ICECAST_PASSWORDS.has(v.toLowerCase()) || v.length < 12;
+  if (weak(getIcecastSourcePassword())) {
+    return "ICECAST_SOURCE_PASSWORD chybí nebo je slabé (min. 12 znaků, ne „hackme“).";
+  }
+  if (weak(getIcecastAdminPassword())) {
+    return "ICECAST_ADMIN_PASSWORD chybí nebo je slabé (min. 12 znaků, ne „hackme“).";
+  }
+  return null;
 }
 
 export function getIcecastAdminUser(): string {
@@ -37,7 +57,7 @@ export function getIcecastAdminUser(): string {
 }
 
 export function getIcecastAdminPassword(): string {
-  return process.env.ICECAST_ADMIN_PASSWORD?.trim() || "hackme";
+  return process.env.ICECAST_ADMIN_PASSWORD?.trim() || "";
 }
 
 /** Veřejná URL pro posluchače (může být jiná než interní host). */
@@ -74,6 +94,26 @@ export function getIcecastSourceUrl(): string {
 
 export function getIcecastAdminBaseUrl(): string {
   return `http://${getIcecastHost()}:${getIcecastPort()}`;
+}
+
+/** Šablona configu v repu — hesla se doplní z env. */
+export function getIcecastTemplatePath(): string {
+  return path.join(process.cwd(), "config", "icecast.example.xml");
+}
+
+function escapeXml(v: string): string {
+  return v
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+export function renderIcecastConfig(template: string): string {
+  return template
+    .replace(/\{\{ICECAST_SOURCE_PASSWORD\}\}/g, () => escapeXml(getIcecastSourcePassword()))
+    .replace(/\{\{ICECAST_RELAY_PASSWORD\}\}/g, () => escapeXml(getIcecastRelayPassword()))
+    .replace(/\{\{ICECAST_ADMIN_PASSWORD\}\}/g, () => escapeXml(getIcecastAdminPassword()));
 }
 
 export function getIcecastConfigPath(): string {

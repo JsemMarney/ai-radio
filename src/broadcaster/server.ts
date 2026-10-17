@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { IcyStreamEncoder, icyMetaInterval } from "@/lib/icy-stream";
 import {
   getIcecastListenUrl,
+  getIcecastSecretProblem,
   isIcecastEnabled,
   waitForIcecastReady,
 } from "@/lib/icecast-config";
@@ -28,7 +29,12 @@ import {
 } from "@/lib/radio-state";
 import { verifyBrokerRequest } from "@/lib/broker-auth";
 import { getStreamBitrate } from "@/lib/ffmpeg";
+import { isTrackId } from "@/lib/library";
+import { verifyMicTicket } from "@/lib/mic-input";
+import { WsConnection } from "@/lib/ws-lite";
+import type { Duplex } from "node:stream";
 import { getStationConfig } from "@/lib/station-config";
+import { getAacBitrateKbps, type StreamFormat } from "@/lib/stream-encoder";
 
 type SseClient = ServerResponse;
 
@@ -111,8 +117,17 @@ async function writeChunk(res: ServerResponse, chunk: Buffer): Promise<void> {
   }
 }
 
-function handleStream(req: IncomingMessage, res: ServerResponse): void {
-  if (isIcecastEnabled() && icecastSource?.isConnected) {
+function handleStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  format: StreamFormat = "mp3",
+): void {
+  const engine = getRadioEngine();
+  if (format === "aac" && !engine.hasFormat("aac")) {
+    sendJson(res, 404, { error: "AAC stream je vypnutý (RADIO_AAC=0)." });
+    return;
+  }
+  if (format === "mp3" && isIcecastEnabled() && icecastSource?.isConnected) {
     const listenUrl = getIcecastListenUrl();
     res.writeHead(302, {
       Location: listenUrl,
@@ -123,14 +138,13 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
-  const engine = getRadioEngine();
   const station = getStationConfig();
   const wantsIcy =
     String(req.headers["icy-metadata"] ?? "").toLowerCase() === "1";
 
   const webPort = process.env.PORT ?? "8787";
   const headers: Record<string, string> = {
-    "Content-Type": "audio/mpeg",
+    "Content-Type": format === "aac" ? "audio/aac" : "audio/mpeg",
     "Cache-Control": "no-cache, no-store, must-revalidate, private",
     Pragma: "no-cache",
     Expires: "0",
@@ -140,7 +154,9 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
     "Accept-Ranges": "none",
     "icy-name": station.name,
     "icy-genre": "Various",
-    "icy-br": String(Math.floor(getStreamBitrate() / 1000)),
+    "icy-br": String(
+      format === "aac" ? getAacBitrateKbps() : Math.floor(getStreamBitrate() / 1000),
+    ),
     "icy-url": `http://127.0.0.1:${webPort}/player`,
     "icy-pub": "1",
   };
@@ -161,7 +177,7 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
   const client: StreamClient = { res, icy, closed: false };
   streamClients.add(client);
 
-  const body = engine.subscribe();
+  const body = engine.subscribe(format);
   const reader = body.getReader();
 
   const pump = (): void => {
@@ -247,7 +263,11 @@ async function handleRequest(
     (req.method === "POST" &&
       url.pathname !== "/request" &&
       !url.pathname.startsWith("/request/")) ||
-    url.pathname === "/transition-preview";
+    url.pathname === "/transition-preview" ||
+    url.pathname === "/queue/full" ||
+    url.pathname === "/stats" ||
+    url.pathname === "/requests/moderation" ||
+    url.pathname === "/break/beds";
 
   if (isControlRoute && !verifyBrokerRequest(req)) {
     sendJson(res, 401, { error: "Neautorizováno." });
@@ -255,7 +275,44 @@ async function handleRequest(
   }
 
   if (req.method === "GET" && url.pathname === "/stream") {
-    handleStream(req, res);
+    handleStream(req, res, "mp3");
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/stream.aac") {
+    handleStream(req, res, "aac");
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/queue/full") {
+    sendJson(res, 200, { items: await engine.getStudioQueue() });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/stats") {
+    sendJson(res, 200, await engine.getLibraryStats());
+    return;
+  }
+
+  if (
+    req.method === "POST" &&
+    (url.pathname === "/queue/next" || url.pathname === "/queue/move")
+  ) {
+    try {
+      const body = JSON.parse(await readBody(req)) as { uuid?: string; toIndex?: number };
+      const uuid = body.uuid?.trim();
+      if (!isTrackId(uuid)) {
+        sendJson(res, 400, { error: "Chybí nebo neplatné uuid." });
+        return;
+      }
+      const ok =
+        url.pathname === "/queue/next"
+          ? await engine.playNext(uuid)
+          : await engine.moveInQueue(uuid, Number(body.toIndex ?? 0));
+      sendJson(res, ok ? 200 : 400, ok ? { ok } : { ok, error: "Akce se nepovedla." });
+    } catch {
+      sendJson(res, 400, { error: "Neplatný JSON." });
+    }
     return;
   }
 
@@ -284,8 +341,8 @@ async function handleRequest(
       const raw = await readBody(req);
       const body = JSON.parse(raw) as { uuid?: string };
       const uuid = body.uuid?.trim();
-      if (!uuid) {
-        sendJson(res, 400, { error: "Chybí uuid." });
+      if (!isTrackId(uuid)) {
+        sendJson(res, 400, { error: "Chybí nebo neplatné uuid." });
         return;
       }
       engine.playNow(uuid);
@@ -325,13 +382,64 @@ async function handleRequest(
   if (req.method === "POST" && url.pathname === "/request") {
     try {
       const raw = await readBody(req);
-      const body = JSON.parse(raw) as { uuid?: string };
+      const body = JSON.parse(raw) as { uuid?: string; from?: unknown; message?: unknown };
       const uuid = body.uuid?.trim();
-      if (!uuid) {
-        sendJson(res, 400, { error: "Chybí uuid." });
+      if (!isTrackId(uuid)) {
+        sendJson(res, 400, { error: "Chybí nebo neplatné uuid." });
         return;
       }
-      const result = await engine.submitListenerRequest(uuid);
+      const result = await engine.submitListenerRequest({
+        uuid,
+        from: body.from,
+        message: body.message,
+      });
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/break/beds") {
+    sendJson(res, 200, { beds: engine.getBedOptions() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/break") {
+    try {
+      const body = JSON.parse(await readBody(req)) as {
+        action?: string;
+        bed?: unknown;
+        bedLevelDb?: unknown;
+      };
+      const result = await engine.controlBreak(String(body.action ?? ""), body);
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  // Posluchač se ptá na stav svých přání (zná jen svoje id).
+  if (req.method === "GET" && url.pathname === "/requests/status") {
+    const ids = (url.searchParams.get("ids") ?? "").split(",").filter(Boolean);
+    sendJson(res, 200, { requests: engine.getRequestStatuses(ids) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/requests/moderation") {
+    sendJson(res, 200, engine.getModerationList());
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/requests/decide") {
+    try {
+      const body = JSON.parse(await readBody(req)) as { id?: string; approve?: boolean };
+      if (typeof body.id !== "string" || typeof body.approve !== "boolean") {
+        sendJson(res, 400, { error: "Chybí id nebo rozhodnutí." });
+        return;
+      }
+      const result = await engine.decideRequest(body.id, body.approve);
       sendJson(res, result.ok ? 200 : 400, result);
     } catch {
       sendJson(res, 400, { error: "Neplatný JSON." });
@@ -344,8 +452,8 @@ async function handleRequest(
       const raw = await readBody(req);
       const body = JSON.parse(raw) as { uuid?: string };
       const uuid = body.uuid?.trim();
-      if (!uuid) {
-        sendJson(res, 400, { error: "Chybí uuid." });
+      if (!isTrackId(uuid)) {
+        sendJson(res, 400, { error: "Chybí nebo neplatné uuid." });
         return;
       }
       const ok = await engine.removeFromQueue(uuid);
@@ -443,9 +551,45 @@ async function shutdown(): Promise<void> {
   await getRadioEngine().stop();
 }
 
+let micConnection: WsConnection | null = null;
+
+/** Mikrofon moderátora ze studia: WebSocket /mic?t=<vstupenka>. */
+function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  if (url.pathname !== "/mic") {
+    socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
+    return;
+  }
+  if (!verifyMicTicket(url.searchParams.get("t"))) {
+    socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    return;
+  }
+
+  const engine = getRadioEngine();
+  micConnection?.close(4000); // nový moderátor přebírá mikrofon
+  const mic = engine.attachMic();
+  const conn = WsConnection.accept(req, socket, head, {
+    onBinary: (data) => mic.push(data),
+    onText: (text) => {
+      try {
+        engine.setMicSettings(JSON.parse(text) as Record<string, unknown>);
+      } catch {
+        // neplatné nastavení ignorovat
+      }
+    },
+    onClose: () => {
+      engine.detachMic(mic);
+      if (micConnection === conn) micConnection = null;
+    },
+  });
+  micConnection = conn;
+}
+
 /** Napojí plné API na existující HTTP server a spustí engine na pozadí. */
 export function attachBroadcasterEngine(server: Server): void {
   httpServer = server;
+  server.removeAllListeners("upgrade");
+  server.on("upgrade", handleUpgrade);
   server.removeAllListeners("request");
   server.on("request", (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -465,12 +609,17 @@ export function attachBroadcasterEngine(server: Server): void {
     console.log(`[broadcaster] Stream (live)     → http://127.0.0.1:${port}/stream`);
   }
   console.log(`[broadcaster] Status / SSE      → http://127.0.0.1:${port}/events`);
-  console.log(`[broadcaster] Real-time pacer   → konstantní tempo, žádné přetáčení`);
+  console.log(`[broadcaster] Mixer            → MP3 (/stream) + AAC (/stream.aac), crossfade v PCM`);
 
   const engine = getRadioEngine();
   engine.onStatusChange = pushSse;
 
-  if (isIcecastEnabled()) {
+  const icecastSecretProblem = isIcecastEnabled() ? getIcecastSecretProblem() : null;
+  if (icecastSecretProblem) {
+    console.error(`[broadcaster] Icecast vypnut: ${icecastSecretProblem}`);
+  }
+
+  if (isIcecastEnabled() && !icecastSecretProblem) {
     void (async () => {
       const ready = await waitForIcecastReady(15_000);
       if (!ready) {

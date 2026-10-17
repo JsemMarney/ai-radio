@@ -13,7 +13,8 @@
     "start:radio": "tsx scripts/broadcaster.ts",
     "start": "concurrently -n web,radio -c blue,magenta \"npm run start:web\" \"npm run start:radio\"",
     "lint": "eslint",
-    "generate:jingle": "node scripts/generate-jingle.mjs"
+    "generate:jingle": "node scripts/generate-jingle.mjs",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "next": "16.3.3",
@@ -30,6 +31,7 @@
     "eslint-config-next": "16.3.3",
     "tailwindcss": "^4",
     "tsx": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "esbuild": "^0.28.2"
   }
 }

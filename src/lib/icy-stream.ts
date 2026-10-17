@@ -9,9 +9,9 @@ export class IcyStreamEncoder {
 
   setTitle(title: string): void {
     if (title === this.pendingTitle || title === this.currentTitle) return;
+    // Projeví se v nejbližším metadata bloku — interval se nesmí rozbít,
+    // jinak klient (VLC, autorádio) čte metadata jako audio a naopak.
     this.pendingTitle = title;
-    // Vynutí metadata blok při nejbližším intervalu
-    this.audioSinceMeta = METADATA_INTERVAL;
   }
 
   /** Vloží audio chunk + případný metadata blok. */
@@ -42,11 +42,11 @@ export class IcyStreamEncoder {
 }
 
 function buildMetadataBlock(title: string): Buffer {
-  const payload = `StreamTitle='${sanitize(title)}';`;
-  const len = Math.ceil(payload.length / 16) * 16;
+  const payload = Buffer.from(`StreamTitle='${sanitize(title)}';`, "utf8");
+  const len = Math.min(255 * 16, Math.ceil(payload.length / 16) * 16);
   const block = Buffer.alloc(1 + len);
   block[0] = len / 16;
-  block.write(payload, 1, "utf8");
+  payload.copy(block, 1, 0, len);
   return block;
 }
 

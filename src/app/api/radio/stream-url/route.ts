@@ -7,9 +7,14 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const origin = new URL(request.url).origin;
+  const requestUrl = new URL(request.url);
+  const origin = requestUrl.origin;
+  const aac = requestUrl.searchParams.get("format") === "aac";
+  const withFormat = (u: string) =>
+    aac ? `${u}${u.includes("?") ? "&" : "?"}format=aac` : u;
 
-  if (isIcecastEnabled()) {
+  // Icecast vysílá jen MP3 — AAC jde vždy přes broker.
+  if (isIcecastEnabled() && !aac) {
     const statusRes = await brokerFetch("/status");
     if (statusRes.ok) {
       const data = (await statusRes.json()) as { icecastLive?: boolean; streamUrl?: string };
@@ -29,7 +34,8 @@ export async function GET(request: Request) {
   if (isLinkSigningEnabled()) {
     const signed = signPath(path);
     return Response.json({
-      url: `${origin}${signed.url}`,
+      // Relativní URL — stejný origin jako stránka (CSP media-src 'self').
+      url: withFormat(signed.url),
       expiresAt: signed.exp,
       signed: true,
       icecast: false,
@@ -37,7 +43,7 @@ export async function GET(request: Request) {
   }
 
   return Response.json({
-    url: getPublicStreamUrl(origin),
+    url: withFormat(aac || !isIcecastEnabled() ? path : getPublicStreamUrl(origin)),
     expiresAt: null,
     signed: false,
     icecast: false,

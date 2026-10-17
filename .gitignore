@@ -43,6 +43,12 @@ next-env.d.ts
 # downloaded audio
 /downloads
 
+# icecast — vygenerovaný config s hesly (šablona: config/icecast.example.xml)
+/config/icecast.xml
+
 # icecast runtime logs
 /config/logs/
 /config/*.log
+
+# release ZIPy pro server
+/release

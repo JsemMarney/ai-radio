@@ -1,11 +1,40 @@
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
 export const STUDIO_COOKIE = "studio_session";
-const SESSION_VERSION = "v2";
+const SESSION_VERSION = "v3";
+/** Jak dlouho platí přihlášení. */
+export const SESSION_TTL_SEC = 60 * 60 * 24 * 7;
+
+const WEAK_PASSWORDS = new Set([
+  "change-me",
+  "changeme",
+  "password",
+  "heslo",
+  "admin",
+  "studio",
+  "radio",
+  "123456",
+  "12345678",
+]);
 
 export function getStudioPassword(): string | undefined {
   return process.env.STUDIO_PASSWORD?.trim() || undefined;
 }
 
-export function getSessionSecret(): string | undefined {
+/** Popis problému s heslem do studia, nebo null když je v pořádku. */
+export function getStudioPasswordProblem(): string | null {
+  const password = getStudioPassword();
+  if (!password) return "STUDIO_PASSWORD není nastavené.";
+  if (WEAK_PASSWORDS.has(password.toLowerCase())) {
+    return "STUDIO_PASSWORD je výchozí / běžné heslo.";
+  }
+  if (password.length < 12) return "STUDIO_PASSWORD má méně než 12 znaků.";
+  return null;
+}
+
+function getSessionSecret(): string | undefined {
   return (
     process.env.SESSION_SECRET?.trim() ||
     process.env.STUDIO_PASSWORD?.trim() ||
@@ -13,55 +42,76 @@ export function getSessionSecret(): string | undefined {
   );
 }
 
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let out = 0;
-  for (let i = 0; i < a.length; i++) {
-    out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+/** Změna hesla zneplatní všechna přihlášení (otisk hesla je součástí podpisu). */
+function passwordFingerprint(password: string): string {
+  return createHash("sha256").update(`studio:${password}`).digest("hex").slice(0, 16);
+}
+
+function sign(secret: string, payload: string): string {
+  return createHmac("sha256", secret).update(payload).digest("base64url");
+}
+
+export function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) {
+    // Porovnat aspoň se sebou, ať délka neprozradí víc než nutno.
+    timingSafeEqual(ab, ab);
+    return false;
   }
-  return out === 0;
+  return timingSafeEqual(ab, bb);
 }
 
-/** Legacy token — zpětná kompatibilita starých cookies. */
-function makeSessionTokenLegacy(password: string): string {
-  let hash = 5381;
-  const str = `studio:${password}`;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
+// ───────── odvolané session (odhlášení) ─────────
+
+function revokedPath(): string {
+  return path.join(process.cwd(), "downloads", ".revoked-sessions.json");
+}
+
+let revokedCache: { mtimeMs: number; ids: Record<string, number> } | null = null;
+
+function readRevoked(): Record<string, number> {
+  const file = revokedPath();
+  if (!existsSync(file)) return {};
+  try {
+    const mtimeMs = statSync(file).mtimeMs;
+    if (revokedCache && revokedCache.mtimeMs === mtimeMs) return revokedCache.ids;
+    const ids = JSON.parse(readFileSync(file, "utf8")) as Record<string, number>;
+    revokedCache = { mtimeMs, ids };
+    return ids;
+  } catch {
+    return {};
   }
-  return (hash >>> 0).toString(16);
 }
 
-async function hmacHex(secret: string, data: string): Promise<string> {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
-  return Array.from(new Uint8Array(sig))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+function revokeSessionId(id: string, exp: number): void {
+  const now = Math.floor(Date.now() / 1000);
+  const ids = { ...readRevoked(), [id]: exp };
+  for (const [k, e] of Object.entries(ids)) if (e < now) delete ids[k];
+  mkdirSync(path.dirname(revokedPath()), { recursive: true });
+  writeFileSync(revokedPath(), JSON.stringify(ids), "utf8");
+  revokedCache = null;
 }
 
-function randomNonce(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+// ───────── tokeny ─────────
+
+type ParsedToken = { exp: number; id: string; mac: string };
+
+function parseToken(token: string): ParsedToken | null {
+  const parts = token.split(".");
+  if (parts.length !== 4 || parts[0] !== SESSION_VERSION) return null;
+  const exp = Number(parts[1]);
+  if (!Number.isInteger(exp) || !parts[2] || !parts[3]) return null;
+  return { exp, id: parts[2], mac: parts[3] };
 }
 
-export async function makeSessionToken(password: string): Promise<string> {
+export function makeSessionToken(password: string): string {
   const secret = getSessionSecret();
-  if (!secret) return makeSessionTokenLegacy(password);
-
-  const nonce = randomNonce();
-  const mac = await hmacHex(secret, `${nonce}:studio:${password}`);
-  return `${SESSION_VERSION}.${nonce}.${mac}`;
+  if (!secret) throw new Error("Chybí SESSION_SECRET / STUDIO_PASSWORD.");
+  const exp = Math.floor(Date.now() / 1000) + SESSION_TTL_SEC;
+  const id = randomBytes(16).toString("base64url");
+  const mac = sign(secret, `${SESSION_VERSION}:${exp}:${id}:${passwordFingerprint(password)}`);
+  return `${SESSION_VERSION}.${exp}.${id}.${mac}`;
 }
 
 export async function verifySession(
@@ -70,21 +120,26 @@ export async function verifySession(
 ): Promise<boolean> {
   if (!password) return true;
   if (!token) return false;
-
-  if (!token.startsWith(`${SESSION_VERSION}.`)) {
-    return timingSafeEqual(token, makeSessionTokenLegacy(password));
-  }
-
   const secret = getSessionSecret();
   if (!secret) return false;
 
-  const parts = token.split(".");
-  if (parts.length !== 3) return false;
-  const [, nonce, mac] = parts;
-  if (!nonce || !mac) return false;
+  const parsed = parseToken(token);
+  if (!parsed) return false;
+  if (parsed.exp <= Math.floor(Date.now() / 1000)) return false;
 
-  const expected = await hmacHex(secret, `${nonce}:studio:${password}`);
-  return timingSafeEqual(mac, expected);
+  const expected = sign(
+    secret,
+    `${SESSION_VERSION}:${parsed.exp}:${parsed.id}:${passwordFingerprint(password)}`,
+  );
+  if (!safeEqual(parsed.mac, expected)) return false;
+  return !(parsed.id in readRevoked());
+}
+
+/** Odhlášení — token přestane platit i kdyby ho někdo zkopíroval. */
+export function revokeSession(token: string | undefined): void {
+  if (!token) return;
+  const parsed = parseToken(token);
+  if (parsed) revokeSessionId(parsed.id, parsed.exp);
 }
 
 export function isStudioAuthEnabled(): boolean {

@@ -99,7 +99,8 @@ export async function probeDuration(filepath: string): Promise<number | null> {
   const ffmpeg = await resolveFfmpeg();
   if (!ffmpeg) return null;
 
-  const ffprobe = ffmpeg.replace(/ffmpeg(\.exe)?$/i, "ffprobe$1");
+  const ffprobe =
+    process.env.FFPROBE_PATH?.trim() || ffmpeg.replace(/ffmpeg(\.exe)?$/i, "ffprobe$1");
 
   try {
     const { stdout } = await execFileAsync(
@@ -151,9 +152,11 @@ export function getRadioTransition(): "crossfade" | "cut" {
 }
 
 export function getStreamBitrate(): number {
-  const raw = Number(process.env.RADIO_STREAM_BITRATE ?? 256);
-  if (!Number.isFinite(raw)) return 256_000;
-  return Math.min(Math.max(Math.floor(raw), 128_000), 320_000);
+  const raw = Number(process.env.RADIO_STREAM_BITRATE ?? 192);
+  if (!Number.isFinite(raw) || raw <= 0) return 192_000;
+  // Přijímá "256" (kbps) i "256000" (bps).
+  const bps = raw < 1000 ? raw * 1000 : raw;
+  return Math.min(Math.max(Math.floor(bps), 96_000), 320_000);
 }
 
 export function mp3EncodeArgs(

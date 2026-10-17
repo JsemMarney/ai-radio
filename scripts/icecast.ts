@@ -1,12 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { loadEnvFiles } from "../src/lib/load-env";
 import {
   getIcecastConfigPath,
   getIcecastPort,
+  getIcecastSecretProblem,
+  getIcecastTemplatePath,
   isIcecastEnabled,
+  renderIcecastConfig,
   resolveIcecastBin,
 } from "../src/lib/icecast-config";
 
@@ -47,8 +50,25 @@ async function main(): Promise<void> {
     return;
   }
 
+  const secretProblem = getIcecastSecretProblem();
+  if (secretProblem) {
+    console.error(`[icecast] Nespouštím: ${secretProblem}`);
+    console.error("[icecast] Nastav silná hesla v .env.local (stejná musí být v icecast.xml).");
+    await new Promise<void>(() => {});
+    return;
+  }
+
   const bin = resolveIcecastBin();
   const config = getIcecastConfigPath();
+
+  // Výchozí config v repu se generuje ze šablony — hesla nikdy nejsou v gitu.
+  if (!process.env.ICECAST_CONFIG?.trim() && existsSync(getIcecastTemplatePath())) {
+    writeFileSync(
+      config,
+      renderIcecastConfig(readFileSync(getIcecastTemplatePath(), "utf8")),
+      "utf8",
+    );
+  }
 
   if (!bin) {
     console.warn("[icecast] Icecast není nainstalovaný.");
