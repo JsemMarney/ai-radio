@@ -91,6 +91,7 @@ export function PlayerClient({ station }: { station: StationConfig }) {
     streamLabel,
     aacAvailable,
     micLive,
+    moderator,
     segment,
   } = useRadio();
   // Pauza na mluvené slovo — hraje jen podkres.
@@ -128,7 +129,7 @@ export function PlayerClient({ station }: { station: StationConfig }) {
 
   const nextTrack = schedule.find((t) => t.kind !== "stinger");
   const tickerItems = [
-    micLive ? "Ve studiu mluví moderátor" : null,
+    micLive ? `Ve studiu mluví ${moderator ?? "moderátor"}` : moderator ? `Moderuje ${moderator}` : null,
     onBreak ? "Krátká přestávka — za chvíli zase hudba" : null,
     nowPlaying ? `Právě hraje: ${nowPlaying.artist} — ${nowPlaying.title}` : null,
     nextTrack ? `Další: ${nextTrack.artist} — ${nextTrack.title}` : null,
@@ -143,6 +144,11 @@ export function PlayerClient({ station }: { station: StationConfig }) {
         <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between gap-4 px-4 sm:px-8">
           <StationHeader config={station} compact />
           <div className="flex shrink-0 items-center gap-4">
+            {moderator ? (
+              <span className="hidden text-xs text-[var(--ink-muted)] md:inline">
+                Moderuje <span className="text-[var(--ink)]">{moderator}</span>
+              </span>
+            ) : null}
             <StationClock />
             <LiveBadge live={onAir} listeners={listeners} />
           </div>
@@ -154,7 +160,11 @@ export function PlayerClient({ station }: { station: StationConfig }) {
           {micLive ? (
             <p className="mb-4 flex items-center gap-2 font-[family-name:var(--font-display)] text-sm font-semibold uppercase tracking-[0.18em] text-[var(--accent)]">
               <span className="live-mic h-2.5 w-2.5 rounded-full bg-[var(--accent)]" />
-              Moderátor ve vysílání
+              {moderator ? `${moderator} je ve vysílání` : "Moderátor ve vysílání"}
+            </p>
+          ) : moderator ? (
+            <p className="mb-4 font-[family-name:var(--font-display)] text-sm font-semibold uppercase tracking-[0.18em] text-[var(--ink-muted)] md:hidden">
+              Moderuje {moderator}
             </p>
           ) : null}
           <NowPlaying

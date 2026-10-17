@@ -25,6 +25,8 @@ export type PersistedRadioState = {
   brokenTracks?: Record<string, BrokenTrackInfo>;
   /** Přání posluchačů (nejnovější první) — i neschválená. */
   requestLog?: ListenerRequest[];
+  /** Jméno moderátora zobrazované posluchačům. */
+  moderator?: string | null;
   updatedAt: string;
 };
 
@@ -291,6 +293,7 @@ export async function writeRotationState(patch: {
   playStats?: Record<string, TrackPlayStats>;
   brokenTracks?: Record<string, BrokenTrackInfo>;
   requestLog?: ListenerRequest[];
+  moderator?: string | null;
 }): Promise<void> {
   const existing = await readRadioState();
   await writeState({ ...existing, ...patch });

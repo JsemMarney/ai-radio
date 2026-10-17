@@ -39,6 +39,7 @@ export async function GET(request: Request) {
         micLive: false,
         moderationPending: 0,
         breakState: "none",
+        moderator: null,
         bed: "builtin",
         bedLevelDb: -10,
         streamUrl: getPublicStreamUrl(origin),

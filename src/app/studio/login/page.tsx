@@ -1,10 +1,9 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 
 export default function StudioLoginPage() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -21,15 +20,17 @@ export default function StudioLoginPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
       });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) throw new Error(data.error || "Přihlášení selhalo.");
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(data.error || `Přihlášení selhalo (${res.status}).`);
 
-      const next = searchParams.get("next") || "/studio";
-      router.push(next);
-      router.refresh();
+      // Jen cesty v rámci webu — žádné přesměrování ven přes ?next=
+      const raw = searchParams.get("next") || "/studio";
+      const next = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/studio";
+      // Plné načtení stránky: cookie s přihlášením jde určitě s požadavkem
+      // (router.push + refresh se na pomalejším spojení předbíhaly a zůstalo se na loginu).
+      window.location.assign(next);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Chyba přihlášení.");
-    } finally {
       setLoading(false);
     }
   }

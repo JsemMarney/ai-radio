@@ -1,4 +1,5 @@
 import { listTracksWithAudio } from "@/lib/library";
+import { getCatalog } from "@/lib/radio-playlist";
 import { readRadioState, writeListenerRequestQueue } from "@/lib/radio-state";
 import type { RadioNowPlaying } from "@/lib/types";
 
@@ -35,10 +36,11 @@ export async function getRequestableTracks(options?: {
   const q = options?.search?.trim().toLowerCase() ?? "";
   const exclude = new Set(options?.excludeUuids ?? []);
 
-  const tracks = await listTracksWithAudio({ readyOnly: true });
+  // Stejný katalog jako rotace — bez duplicitních verzí téže skladby.
+  const catalog = await getCatalog();
   const out: RadioNowPlaying[] = [];
 
-  for (const t of tracks) {
+  for (const t of catalog.values()) {
     if (exclude.has(t.uuid)) continue;
     const hay = `${t.title} ${t.artist} ${t.album ?? ""}`.toLowerCase();
     if (q && !hay.includes(q)) continue;
@@ -49,7 +51,7 @@ export async function getRequestableTracks(options?: {
       album: t.album,
       year: t.year,
       thumbnail: t.thumbnail,
-      durationSec: t.playDuration ?? t.duration,
+      durationSec: t.durationSec,
     });
     if (out.length >= limit) break;
   }

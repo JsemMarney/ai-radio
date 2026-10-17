@@ -201,6 +201,50 @@ export async function listTracksWithAudio(options?: {
   return withAudio;
 }
 
+/**
+ * Přívěsky, které nemění skladbu (remaster, radio edit, feat. …).
+ * Remixy, živáky a covery jsou jiné nahrávky — ty se nesjednocují.
+ */
+const SAME_SONG_SUFFIX =
+  /\b(remaster(ed)?|radio edit|single version|album version|original mix|explicit|clean|mono|stereo|bonus track|deluxe|soundtrack|from ".*")\b/i;
+
+function stripVersionInfo(title: string): string {
+  return title
+    .replace(/[([]([^)\]]*)[)\]]/g, (whole, inner: string) =>
+      SAME_SONG_SUFFIX.test(inner) || /^\s*(feat|ft|with)\b/i.test(inner) ? " " : whole,
+    )
+    .replace(/\s[-–]\s(.*)$/, (whole, tail: string) => (SAME_SONG_SUFFIX.test(tail) ? " " : whole));
+}
+
+function normalizeKeyPart(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** Klíč „stejné skladby“: hlavní interpret + název bez verzí. */
+export function trackMatchKey(title: string, artist: string): string {
+  const primary = artist.split(/,|&|\sfeat\.?\s|\sft\.?\s|\sx\s/i)[0] ?? artist;
+  return `${normalizeKeyPart(primary)}|${normalizeKeyPart(stripVersionInfo(title))}`;
+}
+
+/** Je skladba už v knihovně? Stejné Spotify ID, nebo stejná skladba v jiné verzi. */
+export async function findDuplicateTrack(meta: {
+  id: string;
+  title: string;
+  artist: string;
+}): Promise<{ track: LibraryTrack; sameVersion: boolean } | null> {
+  const tracks = (await listTracks()).filter((t) => t.status === "ready");
+  const exact = tracks.find((t) => t.spotifyId === meta.id);
+  if (exact) return { track: exact, sameVersion: true };
+  const key = trackMatchKey(meta.title, meta.artist);
+  const similar = tracks.find((t) => trackMatchKey(t.title, t.artist) === key);
+  return similar ? { track: similar, sameVersion: false } : null;
+}
+
 export async function findBySpotifyId(
   spotifyId: string,
 ): Promise<LibraryTrack | null> {

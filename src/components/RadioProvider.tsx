@@ -135,6 +135,8 @@ type RadioContextValue = {
   breakState: BreakState;
   bed: string;
   bedLevelDb: number;
+  /** Jméno moderátora (null = nezobrazovat). */
+  moderator: string | null;
   play: () => void;
   pause: () => void;
   toggle: () => void;
@@ -168,6 +170,7 @@ type StatusPayload = {
   breakState?: BreakState;
   bed?: string;
   bedLevelDb?: number;
+  moderator?: string | null;
 };
 
 const CONNECTION_DEBOUNCE_MS = 800;
@@ -206,6 +209,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const [breakState, setBreakState] = useState<BreakState>("none");
   const [bed, setBed] = useState("builtin");
   const [bedLevelDb, setBedLevelDb] = useState(-10);
+  const [moderator, setModerator] = useState<string | null>(null);
   const [quality, setQualityState] = useState<StreamQuality>("auto");
   const [formats, setFormats] = useState<{ mp3: number; aac: number | null }>({
     mp3: 0,
@@ -289,6 +293,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     if (data.breakState !== undefined) setBreakState(data.breakState);
     if (data.bed !== undefined) setBed(data.bed);
     if (data.bedLevelDb !== undefined) setBedLevelDb(data.bedLevelDb);
+    if (data.moderator !== undefined) setModerator(data.moderator);
     if (data.formats) {
       const f = data.formats;
       setFormats((prev) =>
@@ -597,6 +602,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         breakState,
         bed,
         bedLevelDb,
+        moderator,
         play,
         pause,
         toggle,

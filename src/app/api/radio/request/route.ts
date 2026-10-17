@@ -27,7 +27,7 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: { uuid?: string; from?: unknown; message?: unknown };
+  let body: { uuid?: string; from?: unknown; message?: unknown; voice?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
@@ -37,7 +37,7 @@ export async function POST(request: Request) {
   const res = await brokerFetch("/request", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uuid: body.uuid, from: body.from, message: body.message }),
+    body: JSON.stringify({ uuid: body.uuid, from: body.from, message: body.message, voice: body.voice }),
   });
 
   const data = (await res.json().catch(() => ({ ok: false, error: "Broker offline." }))) as {

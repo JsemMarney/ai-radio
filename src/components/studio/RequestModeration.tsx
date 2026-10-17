@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Cover } from "@/components/player/BroadcastUi";
+import { VoiceNoteControls } from "@/components/studio/VoiceNoteControls";
 import { useRadio } from "@/components/RadioProvider";
 import type { ListenerRequest } from "@/lib/types";
 
@@ -107,6 +108,7 @@ export function RequestModeration() {
                   Obsahovalo sprosté slovo — je vyhvězdičkované.
                 </p>
               ) : null}
+              {r.hasVoice ? <VoiceNoteControls id={r.id} sec={r.voiceSec} /> : null}
               <div className="mt-3 flex gap-2">
                 <button
                   type="button"
@@ -139,15 +141,18 @@ export function RequestModeration() {
           </summary>
           <ul className="mt-2">
             {recent.map((r) => (
-              <li
-                key={r.id}
-                className="flex items-center justify-between gap-3 border-t border-[var(--line)] py-1.5 text-xs first:border-t-0"
-              >
-                <span className="min-w-0 truncate">
-                  {r.title}
-                  {r.from ? <span className="text-[var(--ink-muted)]"> · od {r.from}</span> : null}
-                </span>
-                <span className="shrink-0 text-[var(--ink-faint)]">{STATUS_LABEL[r.status]}</span>
+              <li key={r.id} className="border-t border-[var(--line)] py-1.5 text-xs first:border-t-0">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 truncate">
+                    {r.title}
+                    {r.from ? <span className="text-[var(--ink-muted)]"> · od {r.from}</span> : null}
+                    {r.hasVoice ? <span className="text-[var(--accent-soft)]"> · hlasovka</span> : null}
+                  </span>
+                  <span className="shrink-0 text-[var(--ink-faint)]">{STATUS_LABEL[r.status]}</span>
+                </div>
+                {r.hasVoice && (r.status === "approved" || r.status === "played") ? (
+                  <VoiceNoteControls id={r.id} sec={r.voiceSec} />
+                ) : null}
               </li>
             ))}
           </ul>

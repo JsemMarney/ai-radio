@@ -50,5 +50,10 @@ export async function GET(request: Request) {
     if (value) headers.set(key, value);
   }
 
-  return new Response(res.body, { headers });
+  // Když broadcaster spojení ukončí (restart, vypnutí), nenechat chybu propadnout
+  // jako unhandledRejection — posluchač se prostě znovu připojí.
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  res.body.pipeTo(writable).catch(() => {});
+
+  return new Response(readable, { headers });
 }

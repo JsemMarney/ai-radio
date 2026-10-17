@@ -25,8 +25,10 @@ import { TrackTimeline } from "@/components/ProgramSchedule";
 import { BreakPanel } from "@/components/studio/BreakPanel";
 import { MicPanel } from "@/components/studio/MicPanel";
 import { RequestModeration } from "@/components/studio/RequestModeration";
+import { VoiceNoteControls } from "@/components/studio/VoiceNoteControls";
 import { useRadio } from "@/components/RadioProvider";
 import type {
+  DuplicateTrack,
   ImportJob,
   LibraryStats,
   LibraryStatsRow,
@@ -458,7 +460,12 @@ export function StudioClient({ station }: { station: StationConfig }) {
               />
             </div>
             {nowPlaying?.dedication ? (
-              <DedicationNote dedication={nowPlaying.dedication} large title="Přečti do éteru" />
+              <>
+                <DedicationNote dedication={nowPlaying.dedication} large title="Přečti do éteru" />
+                {nowPlaying.dedication.voiceId ? (
+                  <VoiceNoteControls id={nowPlaying.dedication.voiceId} />
+                ) : null}
+              </>
             ) : null}
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <OutlineButton primary onClick={() => void skip()} disabled={!onAir}>
@@ -591,7 +598,15 @@ export function StudioClient({ station }: { station: StationConfig }) {
               onAdd={() => setTab("import")}
             />
           ) : tab === "stats" ? (
-            <StatsTab stats={stats} onNext={(r) => void playNext(r.uuid, r.title)} />
+            <StatsTab
+              stats={stats}
+              onNext={(r) => void playNext(r.uuid, r.title)}
+              onDeleted={() => {
+                void loadLibrary();
+                void loadQueue();
+                void loadStats();
+              }}
+            />
           ) : tab === "import" ? (
             <ImportTab onDone={() => {
               void loadLibrary();
@@ -846,12 +861,82 @@ function Figure({
   );
 }
 
+/** Stejná skladba vícekrát v knihovně — první kopie se hraje, ostatní jdou smazat. */
+function DuplicatesSection({
+  groups,
+  onDeleted,
+}: {
+  groups: DuplicateTrack[][];
+  onDeleted: () => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove(t: DuplicateTrack) {
+    if (!confirm(`Smazat kopii „${t.title}“ (${t.album ?? "bez alba"})? Soubor se odstraní z disku.`)) return;
+    setBusy(t.uuid);
+    setError(null);
+    const res = await fetch(`/api/library/${t.uuid}`, { method: "DELETE" });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    setBusy(null);
+    if (!res.ok) setError(data.error ?? "Smazání selhalo.");
+    else onDeleted();
+  }
+
+  return (
+    <section>
+      <SectionTitle aside={<span className="text-xs text-[var(--ink-faint)]">{groups.length} skladeb</span>}>
+        Duplicity
+      </SectionTitle>
+      {!groups.length ? (
+        <p className="text-sm text-[var(--ink-muted)]">Žádné — každá skladba je v knihovně jen jednou.</p>
+      ) : (
+        <>
+          <p className="mb-3 text-xs text-[var(--ink-muted)]">
+            Stejná skladba ve víc verzích (single × album, remaster). V rotaci hraje jen první kopie;
+            ostatní můžeš smazat.
+          </p>
+          <ul className="space-y-4">
+            {groups.map((group) => (
+              <li key={group[0]!.uuid} className="border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0">
+                <p className="text-sm">
+                  {group[0]!.title} <span className="text-[var(--ink-muted)]">— {group[0]!.artist}</span>
+                </p>
+                <ul className="mt-1">
+                  {group.map((t, i) => (
+                    <li key={t.uuid} className="flex items-center gap-3 py-1 text-xs">
+                      <Cover src={t.thumbnail} size="sm" className="rounded-[2px]" />
+                      <span className="min-w-0 flex-1 truncate text-[var(--ink-muted)]">
+                        {t.album ?? "bez alba"} · {t.plays}× · přidáno {new Date(t.createdAt).toLocaleDateString("cs-CZ")}
+                      </span>
+                      {i === 0 ? (
+                        <span className="shrink-0 text-[var(--ok)]">hraje se</span>
+                      ) : (
+                        <TextButton danger disabled={busy === t.uuid} onClick={() => void remove(t)}>
+                          {busy === t.uuid ? "Mažu…" : "Smazat"}
+                        </TextButton>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+          {error ? <p className="mt-3 text-sm text-[var(--danger)]">{error}</p> : null}
+        </>
+      )}
+    </section>
+  );
+}
+
 function StatsTab({
   stats,
   onNext,
+  onDeleted,
 }: {
   stats: LibraryStats | null;
   onNext: (row: LibraryStatsRow) => void;
+  onDeleted: () => void;
 }) {
   if (!stats) {
     return <p className="text-sm text-[var(--ink-muted)]">Načítám… (statistiky dává broadcaster)</p>;
@@ -917,6 +1002,8 @@ function StatsTab({
           </ul>
         )}
       </section>
+
+      <DuplicatesSection groups={stats.duplicates ?? []} onDeleted={onDeleted} />
 
       <section>
         <SectionTitle>Problémy</SectionTitle>

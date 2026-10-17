@@ -14,7 +14,8 @@
     "start": "concurrently -n web,radio -c blue,magenta \"npm run start:web\" \"npm run start:radio\"",
     "lint": "eslint",
     "generate:jingle": "node scripts/generate-jingle.mjs",
-    "release": "node scripts/release.mjs"
+    "release": "node scripts/release.mjs",
+    "library": "node scripts/library-zip.mjs"
   },
   "dependencies": {
     "next": "16.3.3",

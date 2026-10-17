@@ -11,7 +11,7 @@ import {
 import { ensureBroadcastFile } from "@/lib/remaster";
 import {
   createTrackRecord,
-  findBySpotifyId,
+  findDuplicateTrack,
   getDownloadsDir,
   getTrackDir,
   readTrackInfo,
@@ -43,6 +43,33 @@ const YTDLP_CANDIDATES = [
 
 const YOUTUBE_CLIENT_ARGS =
   "youtube:player_client=android,ios,tv;player_skip=webpage,configs";
+
+/**
+ * Cookies přihlášeného YouTube účtu (Netscape cookies.txt). Na serverech
+ * v datacentru YouTube jinak chce „Sign in to confirm you're not a bot“.
+ * YTDLP_COOKIES = cesta, jinak cookies.txt v kořeni aplikace, když existuje.
+ */
+function cookieArgs(): string[] {
+  const explicit = process.env.YTDLP_COOKIES?.trim();
+  const file = explicit
+    ? path.isAbsolute(explicit)
+      ? explicit
+      : path.join(process.cwd(), explicit)
+    : path.join(process.cwd(), "cookies.txt");
+  return existsSync(file) ? ["--cookies", file] : [];
+}
+
+type SearchSource = { prefix: string; label: string; youtube: boolean };
+
+/** YouTube první; když odmítne (bot check) nebo nic nenajde, zkusí se SoundCloud. */
+const SEARCH_SOURCES: SearchSource[] = [
+  { prefix: "ytsearch5", label: "YouTube", youtube: true },
+  { prefix: "scsearch5", label: "SoundCloud", youtube: false },
+];
+
+function isBotCheck(message: string): boolean {
+  return /sign in to confirm|not a bot|cookies-from-browser/i.test(message);
+}
 
 async function resolveYtDlp(): Promise<string> {
   for (const candidate of YTDLP_CANDIDATES) {
@@ -126,6 +153,49 @@ function buildSearchQueries(meta: SpotifyTrackMeta): string[] {
 
 type SearchHit = { url: string; title: string; score: number };
 
+/** Malá písmena, bez diakritiky, bez závorek (feat., remaster…) a interpunkce. */
+function normalizeForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[([{].*?[)\]}]/g, " ")
+    .replace(/\s-\s.*(remaster|version|edit|mix|mono|stereo).*$/i, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function primaryArtist(artist: string): string {
+  return normalizeForMatch(artist.split(/,|&| feat\.? | ft\.? | x /i)[0] ?? artist);
+}
+
+/**
+ * Je výsledek opravdu ta skladba? Všechna slova názvu musí být v titulku,
+ * interpret v titulku nebo jménu nahrávajícího, a délka zhruba sedět.
+ * (SoundCloud jinak vrací „podobně znějící“ cizí skladby.)
+ */
+function matchesTrack(
+  hit: { title: string; uploader: string; duration: number | null },
+  meta: SpotifyTrackMeta,
+  strict: boolean,
+): boolean {
+  const hay = ` ${normalizeForMatch(hit.title)} `;
+  const words = normalizeForMatch(meta.title).split(" ").filter((w) => w.length >= 2);
+  if (words.length && !words.every((w) => hay.includes(` ${w} `))) return false;
+  if (!strict) return true;
+
+  const artist = primaryArtist(meta.artist);
+  const uploader = ` ${normalizeForMatch(hit.uploader)} `;
+  if (artist && !hay.includes(` ${artist} `) && !uploader.includes(` ${artist} `)) {
+    return false;
+  }
+  if (meta.duration && hit.duration && hit.duration > 0) {
+    const tolerance = Math.max(8, meta.duration * 0.06);
+    if (Math.abs(hit.duration - meta.duration) > tolerance) return false;
+  }
+  return true;
+}
+
 function scoreSearchHit(
   title: string,
   meta: SpotifyTrackMeta,
@@ -140,16 +210,18 @@ function scoreSearchHit(
   if (t.includes(track)) score += 15;
   if (t.includes("lyrics")) score -= 35;
   if (t.includes("8d") || t.includes("slowed") || t.includes("reverb")) score -= 20;
+  if (t.includes("speed up") || t.includes("sped up") || t.includes("nightcore")) score -= 20;
   if (t.includes("live") || t.includes("cover") || t.includes("karaoke")) score -= 25;
   if (t.includes("remix") && !track.includes("remix")) score -= 10;
   return score;
 }
 
-async function searchYouTube(
+async function searchSource(
   ytdlp: string,
   ffmpeg: string | null,
   query: string,
   meta: SpotifyTrackMeta,
+  source: SearchSource,
 ): Promise<SearchHit[]> {
   const stdout = await runYtDlp(
     ytdlp,
@@ -157,25 +229,27 @@ async function searchYouTube(
       "--flat-playlist",
       "--no-warnings",
       "--no-update",
-      "--extractor-args",
-      YOUTUBE_CLIENT_ARGS,
+      ...(source.youtube ? ["--extractor-args", YOUTUBE_CLIENT_ARGS, ...cookieArgs()] : []),
       "--print",
-      "%(title)s\t%(webpage_url)s",
-      `ytsearch5:${query}`,
+      "%(title)s\t%(webpage_url)s\t%(uploader,channel|)s\t%(duration|)s",
+      `${source.prefix}:${query}`,
     ],
     ffmpeg,
   );
 
   const hits: SearchHit[] = [];
   for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const tab = trimmed.indexOf("\t");
-    if (tab <= 0) continue;
-    const title = trimmed.slice(0, tab).trim();
-    const url = trimmed.slice(tab + 1).trim();
-    if (!url.startsWith("http")) continue;
-    hits.push({ url, title, score: scoreSearchHit(title, meta) });
+    const [title = "", url = "", uploader = "", durationRaw = ""] = line.trim().split("\t");
+    if (!title || !url.startsWith("http")) continue;
+    const duration = Number(durationRaw);
+    const candidate = {
+      title: title.trim(),
+      uploader: uploader.trim(),
+      duration: Number.isFinite(duration) && duration > 0 ? duration : null,
+    };
+    // YouTube: stačí, že sedí název. SoundCloud: i interpret a délka.
+    if (!matchesTrack(candidate, meta, !source.youtube)) continue;
+    hits.push({ url: url.trim(), title: candidate.title, score: scoreSearchHit(candidate.title, meta) });
   }
 
   hits.sort((a, b) => b.score - a.score);
@@ -269,9 +343,10 @@ function buildDownloadArgs(
     "-o",
     outputTemplate,
     "--no-mtime",
-    "--extractor-args",
-    YOUTUBE_CLIENT_ARGS,
   ];
+  if (/youtube\.com|youtu\.be/i.test(source)) {
+    args.push("--extractor-args", YOUTUBE_CLIENT_ARGS, ...cookieArgs());
+  }
 
   if (ffmpeg) {
     args.push("--ffmpeg-location", ffmpeg);
@@ -378,7 +453,7 @@ export async function importSpotifyTrack(
   meta: SpotifyTrackMeta,
   onProgress?: ImportProgressCallback,
 ): Promise<LibraryTrack> {
-  const existing = await findBySpotifyId(meta.id);
+  const existing = (await findDuplicateTrack(meta))?.track;
   if (existing) return existing;
 
   const record = createTrackRecord(meta);
@@ -403,47 +478,63 @@ export async function importSpotifyTrack(
 
     let info: Record<string, unknown> | null = null;
 
-    queryLoop: for (const query of queries) {
-      let hits: SearchHit[] = [];
-      try {
-        await onProgress?.({ detail: `Hledám na YouTube: ${query}` });
-        hits = await searchYouTube(ytdlp, ffmpeg, query, meta);
-      } catch (error) {
-        errors.push(`hledání „${query}“: ${shortError(error)}`);
-        continue;
-      }
-
-      if (!hits.length) {
-        errors.push(`hledání „${query}“: žádný výsledek`);
-        continue;
-      }
-
-      for (const hit of hits) {
-        if (triedUrls.has(hit.url)) continue;
-        triedUrls.add(hit.url);
+    sourceLoop: for (const source of SEARCH_SOURCES) {
+      // „official audio“ / „topic“ dávají smysl jen na YouTube.
+      const sourceQueries = source.youtube
+        ? queries
+        : [searchQueryForTrack(meta), `${meta.title} ${primaryArtist(meta.artist)}`];
+      for (const query of sourceQueries) {
+        let hits: SearchHit[] = [];
         try {
-          await onProgress?.({ detail: `Stahuji: ${hit.title}` });
-          info = await downloadFromSource(
-            ytdlp,
-            ffmpeg,
-            outputTemplate,
-            hit.url,
-          );
-          const dlDuration =
-            typeof info.duration === "number" ? info.duration : 0;
-          if (
-            meta.duration &&
-            dlDuration > meta.duration * 1.12
-          ) {
-            errors.push(
-              `„${hit.title}“: moc dlouhé (${Math.round(dlDuration)}s vs katalog ${Math.round(meta.duration)}s)`,
-            );
-            info = null;
-            continue;
-          }
-          break queryLoop;
+          await onProgress?.({ detail: `Hledám (${source.label}): ${query}` });
+          hits = await searchSource(ytdlp, ffmpeg, query, meta, source);
         } catch (error) {
-          errors.push(`„${hit.title}“: ${shortError(error)}`);
+          const msg = shortError(error);
+          errors.push(`${source.label} „${query}“: ${msg}`);
+          // YouTube blokuje server — další dotazy na YouTube nemají smysl.
+          if (isBotCheck(msg)) continue sourceLoop;
+          continue;
+        }
+
+        if (!hits.length) {
+          errors.push(`${source.label} „${query}“: žádný výsledek`);
+          continue;
+        }
+
+        for (const hit of hits) {
+          if (triedUrls.has(hit.url)) continue;
+          triedUrls.add(hit.url);
+          try {
+            await onProgress?.({ detail: `Stahuji (${source.label}): ${hit.title}` });
+            info = await downloadFromSource(
+              ytdlp,
+              ffmpeg,
+              outputTemplate,
+              hit.url,
+            );
+            const dlDuration =
+              typeof info.duration === "number" ? info.duration : 0;
+            if (meta.duration && dlDuration > meta.duration * 1.12) {
+              errors.push(
+                `„${hit.title}“: moc dlouhé (${Math.round(dlDuration)}s vs katalog ${Math.round(meta.duration)}s)`,
+              );
+              info = null;
+              continue;
+            }
+            // SoundCloud u placených skladeb dává jen 30s ukázku.
+            if (meta.duration && dlDuration > 0 && dlDuration < meta.duration * 0.75) {
+              errors.push(
+                `„${hit.title}“: moc krátké (${Math.round(dlDuration)}s vs katalog ${Math.round(meta.duration)}s)`,
+              );
+              info = null;
+              continue;
+            }
+            break sourceLoop;
+          } catch (error) {
+            const msg = shortError(error);
+            errors.push(`„${hit.title}“: ${msg}`);
+            if (isBotCheck(msg)) continue sourceLoop;
+          }
         }
       }
     }
@@ -451,8 +542,8 @@ export async function importSpotifyTrack(
     if (!info) {
       throw new Error(
         errors.length
-          ? errors.slice(0, 3).join(" | ")
-          : "YouTube stažení selhalo.",
+          ? [...new Set([errors[0]!, ...errors.slice(-2)])].join(" | ")
+          : "Stažení selhalo (YouTube ani SoundCloud).",
       );
     }
 

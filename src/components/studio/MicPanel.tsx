@@ -58,8 +58,53 @@ function createResampler(fromRate: number) {
   };
 }
 
+/** Jméno moderátora — posluchači ho vidí v přehrávači („Moderuje: …“). */
+function ModeratorName({ current }: { current: string | null }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const value = draft ?? current ?? "";
+
+  async function save() {
+    if (draft === null || draft.trim() === (current ?? "")) return;
+    setState("saving");
+    try {
+      const res = await fetch("/api/radio/moderator", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: draft }),
+      });
+      setState(res.ok ? "saved" : "error");
+      if (res.ok) setDraft(null);
+    } catch {
+      setState("error");
+    }
+  }
+
+  return (
+    <label className="mt-5 block text-xs text-[var(--ink-muted)]">
+      Moderuje <span className="text-[var(--ink-faint)]">(vidí posluchači; prázdné = skrýt)</span>
+      <input
+        value={value}
+        maxLength={40}
+        placeholder="Tvoje jméno ve vysílání"
+        onChange={(e) => {
+          setDraft(e.target.value);
+          setState("idle");
+        }}
+        onBlur={() => void save()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void save();
+        }}
+        className="mt-1 block w-full border-b border-[var(--line-strong)] bg-transparent py-1.5 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
+      />
+      {state === "saved" ? <span className="mt-1 block text-[var(--ok)]">Uloženo</span> : null}
+      {state === "error" ? <span className="mt-1 block text-[var(--danger)]">Nepodařilo se uložit.</span> : null}
+    </label>
+  );
+}
+
 export function MicPanel() {
-  const { playing, pause, micLive } = useRadio();
+  const { playing, pause, micLive, moderator } = useRadio();
   const [state, setState] = useState<MicState>("off");
   const [error, setError] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
@@ -254,6 +299,8 @@ export function MicPanel() {
           </div>
         </div>
       ) : null}
+
+      <ModeratorName current={moderator} />
 
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         <label className="text-xs text-[var(--ink-muted)]">

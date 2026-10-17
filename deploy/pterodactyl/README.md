@@ -7,7 +7,8 @@ Node 20 nebo novější). Web, rádio i mikrofon ze studia běží na **jednom p
 
 1. Ve správci souborů serveru nahraj ZIP a dej **Unarchive** (rozbalit do kořene,
    aby `index.js` a `package.json` byly přímo v `/home/container`).
-2. Přejmenuj `.env.example` na `.env.local` a vyplň aspoň:
+2. Je-li v ZIPu `.env.local`, je už nastavený a nic dalšího nedělej.
+   Jinak přejmenuj `.env.example` na `.env.local` a vyplň aspoň:
    `STUDIO_PASSWORD` (min. 12 znaků), `SESSION_SECRET`, `BROKER_SECRET`
    a Spotify klíče.
 

@@ -14,7 +14,12 @@ export type RadioNowPlaying = {
   dedication?: Dedication;
 };
 
-export type Dedication = { from: string | null; message: string | null };
+export type Dedication = {
+  from: string | null;
+  message: string | null;
+  /** Id přání s hlasovkou — moderátor ji může pustit do éteru. */
+  voiceId?: string;
+};
 
 export type RequestStatus = "pending" | "approved" | "rejected" | "played" | "expired";
 
@@ -33,6 +38,9 @@ export type ListenerRequest = {
   createdAt: string;
   decidedAt?: string;
   playedAt?: string;
+  /** Posluchač přiložil hlasovku (downloads/_voice/<id>.mp3). */
+  hasVoice?: boolean;
+  voiceSec?: number;
 };
 
 /** Co posluchač vidí o svém přání. */
@@ -175,10 +183,22 @@ export type LibraryStatsRow = {
   broken: { reason: string; at: string } | null;
 };
 
+export type DuplicateTrack = {
+  uuid: string;
+  title: string;
+  artist: string;
+  album: string | null;
+  thumbnail: string | null;
+  createdAt: string;
+  plays: number;
+};
+
 export type LibraryStats = {
   rows: LibraryStatsRow[];
   totalPlays: number;
   libraryHours: number;
+  /** Stejná skladba vícekrát (jiné verze / Spotify ID) — první se hraje, další jsou navíc. */
+  duplicates: DuplicateTrack[][];
 };
 
 export const STREAM_URL = "/api/radio/stream";

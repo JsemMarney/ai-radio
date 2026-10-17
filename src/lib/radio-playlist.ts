@@ -1,4 +1,4 @@
-import { listTracksWithAudio } from "@/lib/library";
+import { listTracksWithAudio, trackMatchKey } from "@/lib/library";
 import type { RadioNowPlaying } from "@/lib/types";
 
 const TRACK_CACHE_TTL_MS = 30_000;
@@ -66,7 +66,13 @@ export async function getCatalog(): Promise<Map<string, CatalogEntry>> {
   }
   const tracks = await listTracksWithAudio({ readyOnly: true });
   const entries = new Map<string, CatalogEntry>();
-  for (const t of tracks) {
+  // Stejná skladba ve více verzích (single × album, remaster) hraje v rotaci jen jednou —
+  // nejstarší kopie vyhrává, ať se vybraná verze neměnila s každým importem.
+  const seenSongs = new Set<string>();
+  for (const t of [...tracks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    const songKey = trackMatchKey(t.title, t.artist);
+    if (seenSongs.has(songKey)) continue;
+    seenSongs.add(songKey);
     entries.set(t.uuid, {
       uuid: t.uuid,
       title: t.title,

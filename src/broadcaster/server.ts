@@ -31,6 +31,7 @@ import { verifyBrokerRequest } from "@/lib/broker-auth";
 import { getStreamBitrate } from "@/lib/ffmpeg";
 import { isTrackId } from "@/lib/library";
 import { verifyMicTicket } from "@/lib/mic-input";
+import { voiceNotePath } from "@/lib/voice-notes";
 import { WsConnection } from "@/lib/ws-lite";
 import type { Duplex } from "node:stream";
 import { getStationConfig } from "@/lib/station-config";
@@ -267,7 +268,8 @@ async function handleRequest(
     url.pathname === "/queue/full" ||
     url.pathname === "/stats" ||
     url.pathname === "/requests/moderation" ||
-    url.pathname === "/break/beds";
+    url.pathname === "/break/beds" ||
+    url.pathname === "/requests/voice";
 
   if (isControlRoute && !verifyBrokerRequest(req)) {
     sendJson(res, 401, { error: "Neautorizováno." });
@@ -382,7 +384,12 @@ async function handleRequest(
   if (req.method === "POST" && url.pathname === "/request") {
     try {
       const raw = await readBody(req);
-      const body = JSON.parse(raw) as { uuid?: string; from?: unknown; message?: unknown };
+      const body = JSON.parse(raw) as {
+        uuid?: string;
+        from?: unknown;
+        message?: unknown;
+        voice?: unknown;
+      };
       const uuid = body.uuid?.trim();
       if (!isTrackId(uuid)) {
         sendJson(res, 400, { error: "Chybí nebo neplatné uuid." });
@@ -392,7 +399,47 @@ async function handleRequest(
         uuid,
         from: body.from,
         message: body.message,
+        voice: body.voice,
       });
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  // Hlasovka k přání — jen pro studio (přehrání do sluchátek).
+  if (req.method === "GET" && url.pathname === "/requests/voice") {
+    const file = voiceNotePath(url.searchParams.get("id") ?? "");
+    if (!file) {
+      sendJson(res, 404, { error: "Hlasovka nenalezena." });
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "audio/mpeg", "Cache-Control": "private, max-age=3600" });
+    createReadStream(file).pipe(res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/requests/play-voice") {
+    try {
+      const body = JSON.parse(await readBody(req)) as { id?: string; stop?: boolean };
+      if (body.stop) {
+        engine.stopVoiceNote();
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      const result = await engine.playVoiceNote(String(body.id ?? ""));
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/moderator") {
+    try {
+      const body = JSON.parse(await readBody(req)) as { name?: unknown };
+      const result = engine.setModerator(body.name);
       sendJson(res, result.ok ? 200 : 400, result);
     } catch {
       sendJson(res, 400, { error: "Neplatný JSON." });

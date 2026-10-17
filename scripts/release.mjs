@@ -74,9 +74,13 @@ mkdirSync(path.join(STAGE, "config"), { recursive: true });
 cpSync(path.join(ROOT, "config", "icecast.example.xml"), path.join(STAGE, "config", "icecast.example.xml"));
 
 const deploy = path.join(ROOT, "deploy", "pterodactyl");
-for (const name of ["index.js", ".env.example", "README.md"]) {
+for (const name of ["index.js", "README.md"]) {
   cpSync(path.join(deploy, name), path.join(STAGE, name));
 }
+// Hotové nastavení serveru (deploy/pterodactyl/.env.local, v gitu ignorované)
+// jde do ZIPu rovnou jako .env.local; jinak jen šablona k vyplnění.
+const envFile = existsSync(path.join(deploy, ".env.local")) ? ".env.local" : ".env.example";
+cpSync(path.join(deploy, envFile), path.join(STAGE, envFile));
 
 // 5) package.json jen s tím, co server opravdu potřebuje
 const runtimePkg = {
@@ -102,7 +106,7 @@ const two = (n) => String(n).padStart(2, "0");
 const stamp = `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}`;
 const zipName = `miss-radio-v${pkg.version}-${stamp}.zip`;
 const zipPath = path.join(RELEASE, zipName);
-const entries = ["index.js", "package.json", "next.config.mjs", ".env.example", "README.md", ".next", "dist", "public", "config"];
+const entries = ["index.js", "package.json", "next.config.mjs", envFile, "README.md", ".next", "dist", "public", "config"];
 
 step(`Balím ${zipName}…`);
 const tarBin =
@@ -122,4 +126,8 @@ if (res.status !== 0) {
 rmSync(STAGE, { recursive: true, force: true });
 const mb = (statSync(zipPath).size / 1024 / 1024).toFixed(1);
 console.log(`\n✓ Hotovo: release/${zipName} (${mb} MB)`);
-console.log("  Nahraj na Pterodactyl, rozbal, .env.example → .env.local, MAIN_FILE = index.js.");
+console.log(
+  envFile === ".env.local"
+    ? "  Obsahuje .env.local (tajné údaje!) — nahraj na Pterodactyl, rozbal, MAIN_FILE = index.js."
+    : "  Nahraj na Pterodactyl, rozbal, .env.example → .env.local, MAIN_FILE = index.js.",
+);

@@ -21,7 +21,7 @@ import {
   probeDuration,
   resolveFfmpeg,
 } from "@/lib/ffmpeg";
-import { getDownloadsDir, getTrack, listTracks } from "@/lib/library";
+import { getDownloadsDir, getTrack, listTracks, trackMatchKey } from "@/lib/library";
 import {
   getMixAnalysis,
   loudnessGain,
@@ -29,6 +29,7 @@ import {
   type MixAnalysis,
 } from "@/lib/mix-analysis";
 import { MicInput } from "@/lib/mic-input";
+import { cleanupVoiceNotes, saveVoiceNote, voiceNotePath } from "@/lib/voice-notes";
 import { listBedOptions, resolveBedPath, type BedOption } from "@/lib/talk-bed";
 import { PcmDeck, SAMPLE_RATE } from "@/lib/pcm-deck";
 import {
@@ -66,6 +67,7 @@ import {
 } from "@/lib/stream-encoder";
 import type {
   BreakState,
+  DuplicateTrack,
   LibraryStats,
   LibraryStatsRow,
   ListenerRequest,
@@ -108,6 +110,8 @@ export type RadioStatus = {
   moderationPending: number;
   /** Pauza na mluvené slovo. */
   breakState: BreakState;
+  /** Jméno moderátora pro posluchače. */
+  moderator: string | null;
   bed: string;
   bedLevelDb: number;
 };
@@ -284,6 +288,8 @@ export class RadioEngine {
   private micGain = 1;
   private micMixedLive = false;
   private micLive = false;
+  private voiceClip: PcmDeck | null = null;
+  private moderator: string | null = null;
 
   private durationCache = new Map<string, number>();
   private midsongConfig: MidsongConfig = {
@@ -364,6 +370,7 @@ export class RadioEngine {
       micLive: this.micLive,
       moderationPending: this.pendingRequests.length,
       breakState: this.breakState,
+      moderator: this.moderator,
       bed: this.bedChoice,
       bedLevelDb: this.bedLevelDb,
       formats: {
@@ -574,6 +581,8 @@ export class RadioEngine {
     this.playStats = boot.playStats ?? {};
     this.brokenInfo = boot.brokenTracks ?? {};
     this.requestLog = boot.requestLog ?? [];
+    this.moderator = boot.moderator ?? null;
+    void cleanupVoiceNotes().catch(() => {});
 
     const catalog = await getCatalog();
     this.requests = (boot.listenerRequests ?? []).filter((id) => catalog.has(id));
@@ -758,7 +767,15 @@ export class RadioEngine {
         this.emitStatus(true);
       });
     }
-    if (!mic && this.duckGain > 0.999) return;
+    // Hlasovka posluchače puštěná do éteru — chová se jako druhý mikrofon.
+    const clip = this.voiceClip;
+    if (clip && clip.ended) {
+      clip.dispose();
+      this.voiceClip = null;
+    }
+    const clipPcm = this.voiceClip ? this.voiceClip.read(n) : null;
+
+    if (!mic && !clipPcm && this.duckGain > 0.999) return;
 
     const voice = mic ? mic.read(n) : null;
     if (voice) {
@@ -768,17 +785,46 @@ export class RadioEngine {
         this.duckHoldUntil = f0 + n + secToFrames(DUCK_HOLD_SEC);
       }
     }
-    const target = voice && f0 < this.duckHoldUntil ? this.duckLevel : 1;
+    if (clipPcm) this.duckHoldUntil = f0 + n + secToFrames(DUCK_HOLD_SEC);
+    const target = (voice || clipPcm) && f0 < this.duckHoldUntil ? this.duckLevel : 1;
     const attack = 1 - Math.exp(-1 / (DUCK_ATTACK_SEC * SAMPLE_RATE));
     const release = 1 - Math.exp(-1 / (DUCK_RELEASE_SEC * SAMPLE_RATE));
     const micScale = 32767 * this.micGain;
 
     for (let i = 0; i < n; i++) {
       this.duckGain += (target - this.duckGain) * (target < this.duckGain ? attack : release);
-      const v = voice ? voice[i]! * micScale : 0;
+      const v = (voice ? voice[i]! * micScale : 0) + (clipPcm ? clipPcm[i * 2]! : 0);
       acc[i * 2] = acc[i * 2]! * this.duckGain + v;
       acc[i * 2 + 1] = acc[i * 2 + 1]! * this.duckGain + v;
     }
+  }
+
+  /** Pustí hlasovku posluchače do éteru (přes hudbu, ta se ztlumí). */
+  async playVoiceNote(requestId: string): Promise<{ ok: boolean; error?: string }> {
+    const request = this.requestLog.find((r) => r.id === requestId);
+    const file = request?.hasVoice ? voiceNotePath(requestId) : null;
+    if (!file || !this.ffmpegPath) return { ok: false, error: "Hlasovka nenalezena." };
+    const deck = new PcmDeck(this.ffmpegPath, file).start();
+    await deck.waitReady();
+    this.voiceClip?.dispose();
+    this.voiceClip = deck;
+    console.info(`[radio] Hlasovka do éteru: ${request!.from ?? "posluchač"} (${request!.title})`);
+    return { ok: true };
+  }
+
+  stopVoiceNote(): void {
+    this.voiceClip?.dispose();
+    this.voiceClip = null;
+  }
+
+  /** Jméno moderátora, které vidí posluchači (prázdné = skrýt). */
+  setModerator(name: unknown): { ok: boolean; error?: string } {
+    const clean = cleanInput(name, 40);
+    if (containsLink(clean)) return { ok: false, error: "Odkaz do jména nepatří." };
+    this.moderator = censor(clean).text || null;
+    void this.persistRotation();
+    this.emitStatus(true);
+    return { ok: true };
   }
 
   /** Nový mikrofon ze studia (starý se odpojí — vysílá vždy jen jeden). */
@@ -1150,7 +1196,13 @@ export class RadioEngine {
       if (req) {
         req.status = "played";
         req.playedAt = new Date().toISOString();
-        if (req.from || req.message) dedication = { from: req.from, message: req.message };
+        if (req.from || req.message || req.hasVoice) {
+          dedication = {
+            from: req.from,
+            message: req.message,
+            ...(req.hasVoice ? { voiceId: req.id } : {}),
+          };
+        }
       }
     }
     const meta: RadioNowPlaying = {
@@ -1387,6 +1439,7 @@ export class RadioEngine {
       playStats: this.playStats,
       brokenTracks: this.brokenInfo,
       requestLog: this.requestLog,
+      moderator: this.moderator,
     }).catch((err: unknown) => console.warn("[radio] Uložení stavu selhalo:", err));
   }
 
@@ -1597,7 +1650,26 @@ export class RadioEngine {
     const totalPlays = Object.values(this.playStats).reduce((a, s) => a + s.plays, 0);
     const libraryHours =
       tracks.reduce((a, t) => a + (t.playDuration ?? t.duration ?? 0), 0) / 3600;
-    return { rows, totalPlays, libraryHours };
+    const groups = new Map<string, DuplicateTrack[]>();
+    for (const t of tracks) {
+      if (t.status !== "ready") continue;
+      const key = trackMatchKey(t.title, t.artist);
+      const list = groups.get(key) ?? [];
+      list.push({
+        uuid: t.uuid,
+        title: t.title,
+        artist: t.artist,
+        album: t.album,
+        thumbnail: t.thumbnail,
+        createdAt: t.createdAt,
+        plays: this.playStats[t.uuid]?.plays ?? 0,
+      });
+      groups.set(key, list);
+    }
+    const duplicates = [...groups.values()]
+      .filter((g) => g.length > 1)
+      .map((g) => g.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+    return { rows, totalPlays, libraryHours, duplicates };
   }
 
   // ───────────────────────── requesty ─────────────────────────
@@ -1647,6 +1719,8 @@ export class RadioEngine {
     uuid: string;
     from?: unknown;
     message?: unknown;
+    /** Hlasovka jako base64 (webm/ogg/mp4 z prohlížeče). */
+    voice?: unknown;
   }): Promise<{
     ok: boolean;
     error?: string;
@@ -1694,6 +1768,19 @@ export class RadioEngine {
       status: "pending",
       createdAt: new Date().toISOString(),
     };
+
+    // Hlasovku nejde cenzurovat — o tom, jestli zazní, rozhoduje moderátor.
+    if (input.voice) {
+      if (!this.ffmpegPath) return { ok: false, error: "Hlasovky teď nejdou zpracovat." };
+      try {
+        const saved = await saveVoiceNote(request.id, input.voice, this.ffmpegPath);
+        request.hasVoice = true;
+        request.voiceSec = Math.round(saved.durationSec);
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : "Hlasovku se nepodařilo uložit." };
+      }
+    }
+
     this.requestLog.unshift(request);
     if (this.requestLog.length > REQUEST_LOG_LIMIT) {
       this.requestLog.length = REQUEST_LOG_LIMIT;

@@ -3,6 +3,7 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { RadioNowPlaying, RequestStatusView } from "@/lib/types";
 import { Cover, LogRow } from "@/components/player/BroadcastUi";
+import { type RecordedVoice, VoiceRecorder } from "@/components/player/VoiceRecorder";
 
 const MY_REQUESTS_KEY = "ai-radio-my-requests";
 const FROM_KEY = "ai-radio-request-from";
@@ -52,6 +53,7 @@ export function SongRequestPanel() {
   const [selected, setSelected] = useState<RadioNowPlaying | null>(null);
   const [from, setFrom] = useState("");
   const [note, setNote] = useState("");
+  const [voice, setVoice] = useState<RecordedVoice | null>(null);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [mine, setMine] = useState<Stored[]>([]);
@@ -122,7 +124,7 @@ export function SongRequestPanel() {
       const res = await fetch("/api/radio/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uuid: selected.uuid, from, message: note }),
+        body: JSON.stringify({ uuid: selected.uuid, from, message: note, voice: voice?.base64 }),
       });
       const data = (await res.json()) as { ok?: boolean; error?: string; id?: string; status?: string };
       if (data.ok && data.id) {
@@ -143,6 +145,7 @@ export function SongRequestPanel() {
         });
         setSelected(null);
         setNote("");
+        setVoice(null);
         void load(query);
       } else {
         setFeedback({ ok: false, text: data.error ?? "Přání se nepodařilo odeslat." });
@@ -226,6 +229,9 @@ export function SongRequestPanel() {
               className="mt-1 block w-full resize-none border-b border-[var(--line-strong)] bg-transparent py-1.5 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
             />
           </label>
+          <div className="mt-4">
+            <VoiceRecorder value={voice} onChange={setVoice} />
+          </div>
           <div className="mt-4 flex items-center justify-between gap-3">
             <p className="text-xs text-[var(--ink-faint)]">Přání nejdřív uvidí moderátor.</p>
             <button
