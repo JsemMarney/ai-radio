@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
 import {
   ListenButton,
   LiveBadge,
@@ -10,9 +10,11 @@ import {
   StationHeader,
   VolumeControl,
 } from "@/components/player/BroadcastUi";
-import { ProgramSchedule, TrackTimeline } from "@/components/ProgramSchedule";
 import { SongRequestPanel } from "@/components/player/SongRequestPanel";
+import { MessagePanel } from "@/components/player/MessagePanel";
+import { SuggestPanel } from "@/components/player/SuggestPanel";
 import { useRadio } from "@/components/RadioProvider";
+import { useCoverTint } from "@/components/player/useCoverTint";
 import type { StationConfig } from "@/lib/types";
 
 function StationClock() {
@@ -33,17 +35,16 @@ function StationClock() {
   );
 }
 
-function Ticker({
-  live,
-  items,
-}: {
-  live: boolean;
-  items: string[];
-}) {
+/** Kolikrát zopakovat texty v jedné polovině pásu, aby byla delší než nejširší obrazovka. */
+const TICKER_REPEAT = 4;
+
+function Ticker({ items }: { items: string[] }) {
   if (!items.length) return null;
+  // Pás = dvě stejné poloviny posouvané o -50 %; každá musí být širší než okno, jinak je vidět konec.
+  const loop = Array.from({ length: TICKER_REPEAT }, () => items).flat();
   const run = (
     <span className="flex shrink-0 items-center">
-      {items.map((text, i) => (
+      {loop.map((text, i) => (
         <span key={i} className="flex items-center">
           <span className="px-6">{text}</span>
           <span aria-hidden className="h-1.5 w-1.5 rotate-45 bg-[var(--ink)]/60" />
@@ -52,15 +53,13 @@ function Ticker({
     </span>
   );
   return (
-    <div className="ticker flex h-8 items-center overflow-hidden bg-[var(--accent)] text-[var(--ink)]">
-      <span className="z-10 flex h-full shrink-0 items-center gap-2 bg-[var(--bg-deep)] px-4 font-[family-name:var(--font-display)] text-xs font-semibold uppercase tracking-[0.2em]">
-        <span
-          className={`h-2 w-2 rounded-full ${live ? "bg-[var(--accent)]" : "bg-[var(--ink-faint)]"}`}
-        />
-        {live ? "Živě" : "Off air"}
-      </span>
+    <div className="ticker flex h-8 items-center overflow-hidden bg-[linear-gradient(90deg,var(--accent),color-mix(in_srgb,var(--accent)_60%,var(--accent-2)))] text-[var(--ink)]">
       <div className="min-w-0 flex-1 overflow-hidden" aria-live="off">
-        <div className="ticker-track font-[family-name:var(--font-display)] text-sm font-semibold uppercase tracking-wider">
+        <div
+          className="ticker-track text-xs font-semibold uppercase tracking-wide sm:text-[13px]"
+          // Delší pás = delší doba, ať rychlost zůstane stejná.
+          style={{ animationDuration: `${40 * TICKER_REPEAT}s` }}
+        >
           {run}
           <span aria-hidden className="flex">{run}</span>
         </div>
@@ -73,9 +72,7 @@ export function PlayerClient({ station }: { station: StationConfig }) {
   const {
     playing,
     nowPlaying,
-    trackStartedAt,
     recentlyPlayed,
-    schedule,
     listeners,
     broadcasting,
     stationOnline,
@@ -86,19 +83,20 @@ export function PlayerClient({ station }: { station: StationConfig }) {
     reconnect,
     volume,
     setVolume,
-    quality,
-    setQuality,
-    streamLabel,
-    aacAvailable,
     micLive,
-    moderator,
+    moderator: moderatorName,
+    moderatorOnAir,
+    tickerMessages,
     segment,
   } = useRadio();
+  // Dlouho bez vstupu → posluchači vidí AutoDJ místo jména moderátora.
+  const moderator = micLive || moderatorOnAir ? moderatorName : null;
   // Pauza na mluvené slovo — hraje jen podkres.
   const onBreak = segment === "talk";
   const [copied, setCopied] = useState(false);
 
   const onAir = broadcasting && stationOnline;
+  const tint = useCoverTint(onBreak ? null : nowPlaying?.thumbnail);
   const tuning = connection === "connecting" || connection === "reconnecting";
   const history = recentlyPlayed
     .filter((t) => t.uuid !== nowPlaying?.uuid)
@@ -113,7 +111,6 @@ export function PlayerClient({ station }: { station: StationConfig }) {
   const statusLine = (() => {
     if (!stationOnline) return "Zkusíme to znovu sami, nemusíš nic dělat.";
     if (tuning) return "Připojuji…";
-    if (playing) return "Posloucháš živé vysílání.";
     return null;
   })();
 
@@ -127,132 +124,101 @@ export function PlayerClient({ station }: { station: StationConfig }) {
     }
   }
 
-  const nextTrack = schedule.find((t) => t.kind !== "stinger");
   const tickerItems = [
-    micLive ? `Ve studiu mluví ${moderator ?? "moderátor"}` : moderator ? `Moderuje ${moderator}` : null,
+    ...tickerMessages,
+    micLive ? `Ve studiu mluví ${moderator ?? "moderátor"}` : moderator ? `Moderuje ${moderator}` : "Hraje AutoDJ",
     onBreak ? "Krátká přestávka — za chvíli zase hudba" : null,
     nowPlaying ? `Právě hraje: ${nowPlaying.artist} — ${nowPlaying.title}` : null,
-    nextTrack ? `Další: ${nextTrack.artist} — ${nextTrack.title}` : null,
     `${station.name} · ${station.tagline}`,
     "Přej si písničku dole na stránce",
   ].filter((t): t is string => Boolean(t));
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <Ticker live={onAir} items={tickerItems} />
-      <header className="border-b border-[var(--line)]">
-        <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between gap-4 px-4 sm:px-8">
+    <div className="ambient flex min-h-screen flex-col" style={{ "--tint": tint } as CSSProperties}>
+      <Ticker items={tickerItems} />
+      <header className="sticky top-0 z-20 border-b border-[var(--line)] bg-[var(--bg-deep)]/60 backdrop-blur-xl">
+        <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
           <StationHeader config={station} compact />
           <div className="flex shrink-0 items-center gap-4">
-            {moderator ? (
-              <span className="hidden text-xs text-[var(--ink-muted)] md:inline">
-                Moderuje <span className="text-[var(--ink)]">{moderator}</span>
-              </span>
-            ) : null}
             <StationClock />
-            <LiveBadge live={onAir} listeners={listeners} />
+            <LiveBadge live={onAir} listeners={listeners} lamp={false} />
           </div>
         </div>
       </header>
 
-      <main className="mx-auto grid w-full max-w-7xl flex-1 gap-12 px-4 py-8 sm:px-8 lg:grid-cols-[minmax(0,460px)_minmax(0,1fr)] lg:gap-24 lg:py-14">
-        <section className="animate-fade-up mx-auto w-full max-w-[460px] hero-sticky lg:mx-0 lg:self-start">
-          {micLive ? (
-            <p className="mb-4 flex items-center gap-2 font-[family-name:var(--font-display)] text-sm font-semibold uppercase tracking-[0.18em] text-[var(--accent)]">
-              <span className="live-mic h-2.5 w-2.5 rounded-full bg-[var(--accent)]" />
-              {moderator ? `${moderator} je ve vysílání` : "Moderátor ve vysílání"}
-            </p>
-          ) : moderator ? (
-            <p className="mb-4 font-[family-name:var(--font-display)] text-sm font-semibold uppercase tracking-[0.18em] text-[var(--ink-muted)] md:hidden">
-              Moderuje {moderator}
-            </p>
-          ) : null}
+      <main className="mx-auto w-full max-w-6xl flex-1 space-y-6 px-4 py-6 sm:px-6 sm:py-8">
+        <section className="animate-fade-up">
           <NowPlaying
             track={onBreak ? null : nowPlaying}
             placeholder={onBreak ? "Mluvené slovo" : placeholder}
-            playing={playing && connection === "live"}
-          />
-
-          <div className="mt-6">
-            <TrackTimeline
-              trackId={nowPlaying?.uuid ?? null}
-              trackStartedAt={trackStartedAt}
-              durationSec={nowPlaying?.durationSec ?? null}
-              active={Boolean(nowPlaying && broadcasting && !onBreak)}
-            />
-          </div>
-
-          <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
-            <ListenButton playing={playing} busy={playing && tuning} onToggle={toggle} />
-            <VolumeControl
-              volume={volume}
-              onChange={setVolume}
-              onToggleMute={() => setVolume(volume > 0 ? 0 : readLastVolume())}
-            />
-          </div>
-
-          {error ? (
-            <p className="mt-4 text-sm text-[var(--danger)]" role="alert">
-              {error}{" "}
-              <button
-                type="button"
-                onClick={reconnect}
-                className="underline underline-offset-2 hover:text-[var(--ink)]"
-              >
-                Připojit znovu
-              </button>
-            </p>
-          ) : statusLine ? (
-            <p className="mt-4 text-sm text-[var(--ink-muted)]" aria-live="polite">
-              {statusLine}
-            </p>
-          ) : null}
-
-          {aacAvailable ? (
-            <div className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-[var(--ink-muted)]">
-              <span>Kvalita</span>
-              <div className="flex overflow-hidden rounded-full border border-[var(--line-strong)]" role="radiogroup" aria-label="Kvalita streamu">
-                {(
-                  [
-                    ["auto", "Auto"],
-                    ["high", "Vysoká"],
-                    ["low", "Úsporná"],
-                  ] as const
-                ).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    role="radio"
-                    aria-checked={quality === value}
-                    onClick={() => setQuality(value)}
-                    className={`px-3 py-1 transition-colors ${
-                      quality === value
-                        ? "bg-[var(--ink)] text-[var(--bg-deep)]"
-                        : "hover:text-[var(--ink)]"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {streamLabel ? (
-                <span className="font-[family-name:var(--font-mono)] text-[var(--ink-faint)]">
-                  {streamLabel}
-                </span>
-              ) : null}
+            aside={
+              stationOnline ? (
+                micLive ? (
+                  <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--accent-soft)]">
+                    <span className="live-mic h-2 w-2 rounded-full bg-[var(--accent)]" />
+                    {moderator ? `${moderator} mluví živě` : "Moderátor mluví živě"}
+                  </span>
+                ) : (
+                  <span className="text-xs text-[var(--ink-muted)]">
+                    {moderator ? (
+                      <>
+                        Moderuje <span className="font-semibold text-[var(--ink)]">{moderator}</span>
+                      </>
+                    ) : (
+                      <>
+                        Hraje <span className="font-semibold text-[var(--ink)]">AutoDJ</span>
+                      </>
+                    )}
+                  </span>
+                )
+              ) : null
+            }
+          >
+            <div className="mt-7 flex flex-wrap items-center gap-x-6 gap-y-4">
+              <ListenButton playing={playing} busy={playing && tuning} onToggle={toggle} />
+              <VolumeControl
+                volume={volume}
+                onChange={setVolume}
+                onToggleMute={() => setVolume(volume > 0 ? 0 : readLastVolume())}
+              />
             </div>
-          ) : null}
+            {error ? (
+              <p className="mt-4 text-sm text-[var(--danger)]" role="alert">
+                {error}{" "}
+                <button
+                  type="button"
+                  onClick={reconnect}
+                  className="underline underline-offset-2 hover:text-[var(--ink)]"
+                >
+                  Připojit znovu
+                </button>
+              </p>
+            ) : statusLine ? (
+              <p className="mt-4 text-sm text-[var(--ink-muted)]" aria-live="polite">
+                {statusLine}
+              </p>
+            ) : null}
+          </NowPlaying>
         </section>
 
-        <div className="animate-fade-up min-w-0 space-y-12">
-          <ProgramSchedule tracks={schedule} title="Na řadě" />
-          <ProgramLog title="Hrálo" tracks={history.slice(0, 8)} />
-          <SongRequestPanel />
+        {/* Na počítači má karta s přáními stejnou výšku jako „Hrálo“ — seznam se roztáhne, zbytek se posouvá. */}
+        <div className="animate-fade-up grid items-start gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-stretch">
+          <Card fill>
+            <ListenerTabs />
+          </Card>
+          <Card>
+            <h2 className="mb-4 text-xl font-bold tracking-tight">Hrálo</h2>
+            {history.length ? (
+              <ProgramLog tracks={history.slice(0, 8)} />
+            ) : (
+              <p className="py-8 text-center text-sm text-[var(--ink-muted)]">Zatím nic nehrálo.</p>
+            )}
+          </Card>
         </div>
       </main>
 
       <footer className="border-t border-[var(--line)]">
-        <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-[var(--ink-muted)] sm:px-8">
+        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-[var(--ink-muted)] sm:px-6">
           <span>
             {station.name} · {station.tagline}
           </span>
@@ -270,6 +236,60 @@ export function PlayerClient({ station }: { station: StationConfig }) {
           </div>
         </div>
       </footer>
+    </div>
+  );
+}
+
+type ListenerTab = "request" | "suggest" | "message";
+
+const LISTENER_TABS: [ListenerTab, string, string][] = [
+  ["request", "Přej si písničku", "Přání"],
+  ["suggest", "Navrhni novou", "Navrhnout"],
+  ["message", "Vzkaz do studia", "Vzkaz"],
+];
+
+/** Všechno, co posluchač může poslat do studia — v jedné kartě se záložkami. */
+function ListenerTabs() {
+  const [tab, setTab] = useState<ListenerTab>("request");
+  return (
+    <section className="flex min-h-0 flex-col lg:h-full">
+      <div className="mb-5 flex shrink-0 gap-1 overflow-x-auto rounded-full border border-[var(--line)] bg-[var(--bg-deep)]/60 p-1" role="tablist">
+        {LISTENER_TABS.map(([value, label, short]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={tab === value}
+            onClick={() => setTab(value)}
+            className={`flex-1 whitespace-nowrap rounded-full px-3 py-2 text-sm font-semibold transition-colors ${
+              tab === value ? "btn-glow text-[var(--ink)]" : "text-[var(--ink-muted)] hover:bg-[var(--ink)]/5 hover:text-[var(--ink)]"
+            }`}
+          >
+            <span className="hidden sm:inline">{label}</span>
+            <span className="sm:hidden">{short}</span>
+          </button>
+        ))}
+      </div>
+      {/* Panely zůstávají připojené — rozepsaný vzkaz ani hledání se přepnutím neztratí. */}
+      <div className={tab === "request" ? "min-h-0 flex-1" : "hidden"}>
+        <SongRequestPanel />
+      </div>
+      <div hidden={tab !== "suggest"}>
+        <SuggestPanel />
+      </div>
+      <div hidden={tab !== "message"}>
+        <MessagePanel />
+      </div>
+    </section>
+  );
+}
+
+function Card({ children, fill = false }: { children: ReactNode; fill?: boolean }) {
+  if (!fill) return <div className="glass min-w-0 rounded-3xl p-5 sm:p-6">{children}</div>;
+  // fill: obsah nepřidává výšku řádku (na lg) — kartu natáhne soused a obsah se do ní vejde.
+  return (
+    <div className="glass relative min-w-0 rounded-3xl lg:min-h-[32rem]">
+      <div className="p-5 sm:p-6 lg:absolute lg:inset-0 lg:overflow-y-auto">{children}</div>
     </div>
   );
 }

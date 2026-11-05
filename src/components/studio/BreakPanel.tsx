@@ -134,7 +134,11 @@ export function BreakPanel({
         </div>
       )}
 
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+      <details className="group mt-5">
+        <summary className="cursor-pointer list-none text-xs font-semibold text-[var(--ink-muted)] hover:text-[var(--ink)]">
+          <span className="inline-block transition-transform group-open:rotate-90">›</span> Podkres a hlasitost
+        </summary>
+      <div className="mt-3 grid gap-4 sm:grid-cols-2">
         <label className="text-xs text-[var(--ink-muted)]">
           Podkres
           <select
@@ -174,13 +178,14 @@ export function BreakPanel({
         </label>
       </div>
 
-      {error ? (
-        <p className="mt-3 text-sm text-[var(--danger)]" role="alert">{error}</p>
-      ) : (
         <p className="mt-3 text-xs text-[var(--ink-faint)]">
           Vlastní podkresy dej do složky public/beds. „Další skladba“ během pauzy taky pokračuje.
         </p>
-      )}
+      </details>
+
+      {error ? (
+        <p className="mt-3 text-sm text-[var(--danger)]" role="alert">{error}</p>
+      ) : null}
     </section>
   );
 }

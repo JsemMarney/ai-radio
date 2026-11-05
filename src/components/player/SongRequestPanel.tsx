@@ -113,7 +113,13 @@ export function SongRequestPanel() {
     };
   }, [mine]);
 
-  if (enabled === false) return null;
+  if (enabled === false) {
+    return (
+      <section>
+        <p className="text-sm text-[var(--ink-muted)]">Přání jsou teď vypnutá. Zkus to později.</p>
+      </section>
+    );
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -158,12 +164,11 @@ export function SongRequestPanel() {
   }
 
   return (
-    <section>
-      <h2 className="label mb-3">Přání</h2>
+    <section className="flex min-h-0 flex-col lg:h-full">
 
       {statuses.length ? (
         <div className="mb-6">
-          <p className="mb-1 text-xs text-[var(--ink-muted)]">Tvoje přání</p>
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Tvoje přání</p>
           <ul>
             {statuses.map((r) => {
               const s = statusText(r);
@@ -194,7 +199,7 @@ export function SongRequestPanel() {
       ) : null}
 
       {selected ? (
-        <form onSubmit={submit} className="border border-[var(--line-strong)] p-4">
+        <form onSubmit={submit} className="rounded-xl border border-[var(--line-strong)] bg-[var(--bg-deep)]/40 p-4">
           <div className="flex items-center gap-3">
             <Cover src={selected.thumbnail} size="sm" className="rounded-[2px]" />
             <div className="min-w-0 flex-1">
@@ -237,7 +242,7 @@ export function SongRequestPanel() {
             <button
               type="submit"
               disabled={busy}
-              className="shrink-0 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--accent-soft)] disabled:opacity-50"
+              className="shrink-0 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-[var(--ink)] transition-colors hover:bg-[var(--accent-soft)] disabled:opacity-50"
             >
               {busy ? "Posílám…" : "Poslat přání"}
             </button>
@@ -245,14 +250,18 @@ export function SongRequestPanel() {
         </form>
       ) : (
         <>
+          <p id="request-hint" className="mb-3 text-sm text-[var(--ink-muted)]">
+            Vyber písničku — k přání můžeš připsat vzkaz i nahrát hlasovku 🎙
+          </p>
           <input
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Interpret nebo název skladby"
-            className="w-full border-b border-[var(--line-strong)] bg-transparent py-2 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
+            placeholder="Hledej interpreta nebo skladbu…"
+            aria-describedby="request-hint"
+            className="w-full rounded-full border border-[var(--line-strong)] bg-[var(--bg-deep)] px-4 py-2.5 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
           />
-          <ul className="mt-2 max-h-72 overflow-y-auto pr-1">
+          <ul className="mt-3 h-80 overflow-y-auto pr-3 lg:h-auto lg:min-h-48 lg:flex-1">
             {tracks.length ? (
               tracks.map((track) => (
                 <LogRow

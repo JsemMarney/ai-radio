@@ -27,10 +27,19 @@ export type PersistedRadioState = {
   requestLog?: ListenerRequest[];
   /** Jméno moderátora zobrazované posluchačům. */
   moderator?: string | null;
+  /** Vlastní texty do běžícího pruhu (ze studia). */
+  tickerMessages?: string[];
   updatedAt: string;
 };
 
-export type TrackPlayStats = { plays: number; lastPlayedAt: string };
+export type TrackPlayStats = {
+  plays: number;
+  lastPlayedAt: string;
+  /** Kolikrát ji moderátor přeskočil v první polovině — AutoDJ ji pak dává méně. */
+  skips?: number;
+  /** Kolikrát si ji posluchači přáli (schválená přání) — AutoDJ ji dává víc. */
+  requests?: number;
+};
 export type BrokenTrackInfo = { reason: string; at: string };
 
 export function getMaxRecentTracks(): number {
@@ -294,6 +303,7 @@ export async function writeRotationState(patch: {
   brokenTracks?: Record<string, BrokenTrackInfo>;
   requestLog?: ListenerRequest[];
   moderator?: string | null;
+  tickerMessages?: string[];
 }): Promise<void> {
   const existing = await readRadioState();
   await writeState({ ...existing, ...patch });

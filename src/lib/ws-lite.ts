@@ -51,6 +51,16 @@ export class WsConnection {
     return conn;
   }
 
+  /** Kolik bajtů čeká v socketu na odeslání (pomalý klient → zahazovat). */
+  get pendingBytes(): number {
+    return (this.socket as Duplex & { writableLength?: number }).writableLength ?? 0;
+  }
+
+  sendBinary(payload: Buffer): void {
+    if (this.closed) return;
+    this.socket.write(Buffer.concat([this.header(0x2, payload.length), payload]));
+  }
+
   sendText(text: string): void {
     if (this.closed) return;
     const payload = Buffer.from(text, "utf8");

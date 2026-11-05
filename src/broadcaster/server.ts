@@ -269,7 +269,10 @@ async function handleRequest(
     url.pathname === "/stats" ||
     url.pathname === "/requests/moderation" ||
     url.pathname === "/break/beds" ||
-    url.pathname === "/requests/voice";
+    url.pathname === "/requests/voice" ||
+    url.pathname === "/listener-stats" ||
+    url.pathname === "/ai-dj" ||
+    url.pathname === "/schedule";
 
   if (isControlRoute && !verifyBrokerRequest(req)) {
     sendJson(res, 401, { error: "Neautorizováno." });
@@ -447,6 +450,59 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/ticker") {
+    try {
+      const body = JSON.parse(await readBody(req)) as { messages?: unknown };
+      const result = engine.setTickerMessages(body.messages);
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  if (url.pathname === "/ai-dj" && req.method === "GET") {
+    sendJson(res, 200, engine.getAiDjState());
+    return;
+  }
+
+  if (url.pathname === "/ai-dj" && req.method === "POST") {
+    try {
+      sendJson(res, 200, await engine.setAiDjSettings(JSON.parse(await readBody(req))));
+    } catch {
+      sendJson(res, 400, { error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  if (url.pathname === "/ai-dj/now" && req.method === "POST") {
+    const result = await engine.aiDjNow();
+    sendJson(res, result.ok ? 200 : 400, result);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/listener-stats") {
+    sendJson(res, 200, engine.getListenerStats());
+    return;
+  }
+
+  if (url.pathname === "/schedule") {
+    if (req.method === "GET") {
+      sendJson(res, 200, { entries: engine.getSchedule() });
+      return;
+    }
+    if (req.method === "POST") {
+      try {
+        const body = JSON.parse(await readBody(req)) as { entries?: unknown };
+        const result = await engine.setSchedule(body.entries);
+        sendJson(res, result.ok ? 200 : 400, result);
+      } catch {
+        sendJson(res, 400, { error: "Neplatný JSON." });
+      }
+      return;
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/break/beds") {
     sendJson(res, 200, { beds: engine.getBedOptions() });
     return;
@@ -603,6 +659,10 @@ let micConnection: WsConnection | null = null;
 /** Mikrofon moderátora ze studia: WebSocket /mic?t=<vstupenka>. */
 function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  if (url.pathname === "/monitor") {
+    handleMonitorUpgrade(url, req, socket, head);
+    return;
+  }
   if (url.pathname !== "/mic") {
     socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
     return;
@@ -630,6 +690,28 @@ function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void
     },
   });
   micConnection = conn;
+}
+
+/** ~0,7 s zvuku ve frontě socketu = pomalé spojení → raději zahazovat než zpožďovat. */
+const MONITOR_MAX_PENDING = 64 * 1024;
+
+/** Přímý odposlech mixu pro studio: WebSocket /monitor?t=<vstupenka>, mono PCM s16le 44,1 kHz. */
+function handleMonitorUpgrade(url: URL, req: IncomingMessage, socket: Duplex, head: Buffer): void {
+  if (!verifyMicTicket(url.searchParams.get("t"))) {
+    socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    return;
+  }
+  const engine = getRadioEngine();
+  let off: (() => void) | null = null;
+  const conn = WsConnection.accept(req, socket, head, {
+    onClose: () => off?.(),
+  });
+  if (!conn) return;
+  conn.sendText(JSON.stringify({ sampleRate: 44100, listenerDelaySec: engine.getListenerDelaySec() }));
+  off = engine.addMonitor((pcm) => {
+    if (conn.pendingBytes > MONITOR_MAX_PENDING) return;
+    conn.sendBinary(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+  });
 }
 
 /** Napojí plné API na existující HTTP server a spustí engine na pozadí. */

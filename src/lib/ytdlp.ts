@@ -106,6 +106,8 @@ function ytdlpEnv(ytdlp: string, ffmpeg: string | null) {
   return {
     ...process.env,
     PATH: [...extra, process.env.PATH ?? ""].filter(Boolean).join(pathSeparator()),
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUTF8: "1",
   };
 }
 
@@ -144,8 +146,8 @@ function shortError(error: unknown): string {
 function buildSearchQueries(meta: SpotifyTrackMeta): string[] {
   const base = searchQueryForTrack(meta);
   return [
-    `${base} official audio`,
     `${meta.artist} ${meta.title} topic`,
+    `${base} official audio`,
     `${base} audio`,
     base,
   ];
@@ -179,8 +181,11 @@ function matchesTrack(
   meta: SpotifyTrackMeta,
   strict: boolean,
 ): boolean {
-  const hay = ` ${normalizeForMatch(hit.title)} `;
-  const words = normalizeForMatch(meta.title).split(" ").filter((w) => w.length >= 2);
+  // Text v závorkách taky počítat — „Sunflower (Spider-Man: …)“ vs Spotify „Sunflower - Spider-Man: …“.
+  const hay = ` ${normalizeForMatch(hit.title)} ${normalizeLoose(hit.title)} `;
+  // Spotify píše podtitul / verzi za „ - “ — povinný je jen hlavní název.
+  const mainTitle = meta.title.split(/\s[-–]\s/)[0] ?? meta.title;
+  const words = normalizeForMatch(mainTitle).split(" ").filter((w) => w.length >= 2);
   if (words.length && !words.every((w) => hay.includes(` ${w} `))) return false;
   if (!strict) return true;
 
@@ -196,14 +201,63 @@ function matchesTrack(
   return true;
 }
 
+/** Jiná než studiová verze — živák, cover, akustika, karaoke… */
+const NOT_STUDIO = [
+  /\blive\b/,
+  // \b v JS nezná diakritiku — česká slova jako podřetězec.
+  /živě|naživo|na živo/,
+  /koncert|\bconcert\b/,
+  /\bunplugged\b/,
+  /\bacoustic\b|akustick/,
+  /\bcover\b/,
+  /\bkaraoke\b/,
+  /\binstrumental\b/,
+  /\b(session|sessions)\b/,
+  /\b(festival|tour|rehearsal|performance)\b/,
+  /\b(reaction|reakce)\b/,
+  /\b(sped up|speed up|slowed|nightcore|8d)\b/,
+  /\bremix\b/,
+  /\bmix\b/,
+  /\bdemo\b/,
+  /\bunreleased\b|\bleak(ed)?\b/,
+];
+
+/** Je hit jiná verze, než chceme? (Slovo, které je přímo v názvu ze Spotify, se nepočítá.) */
+function isNotStudioVersion(title: string, meta: SpotifyTrackMeta): boolean {
+  const t = title.toLowerCase();
+  const wanted = `${meta.title} ${meta.album ?? ""}`.toLowerCase();
+  if (NOT_STUDIO.some((re) => re.test(t) && !re.test(wanted))) return true;
+  // „Clocks (feat. Coldplay)“ — hlavní interpret jako host = cizí nahrávka / cover.
+  const main = primaryArtist(meta.artist);
+  return Boolean(main) && new RegExp(`\\b(feat|ft)\\b ${main}\\b`).test(normalizeLoose(title));
+}
+
+/** Jako normalizeForMatch, ale obsah závorek zůstává (jen bez závorek a interpunkce). */
+function normalizeLoose(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
 function scoreSearchHit(
   title: string,
   meta: SpotifyTrackMeta,
+  uploader = "",
 ): number {
   const t = title.toLowerCase();
+  // „Interpret - Topic“ = automatický kanál YouTube Music se studiovou nahrávkou.
+  const topicChannel = /\s-\stopic$/i.test(uploader.trim());
   const artist = meta.artist.toLowerCase();
   const track = meta.title.toLowerCase();
   let score = 0;
+  if (topicChannel) score += 60;
+  // Sedí i podtitul ze Spotify („- Radio Edit“, „- From …“) → spíš ta správná verze.
+  const loose = ` ${normalizeLoose(title)} `;
+  const fullWords = normalizeLoose(meta.title).split(" ").filter((w) => w.length >= 2);
+  if (fullWords.every((w) => loose.includes(` ${w} `))) score += 20;
   if (t.includes("official audio") || t.includes("provided to youtube")) score += 40;
   if (t.includes("topic")) score += 30;
   if (t.includes(artist)) score += 15;
@@ -249,7 +303,16 @@ async function searchSource(
     };
     // YouTube: stačí, že sedí název. SoundCloud: i interpret a délka.
     if (!matchesTrack(candidate, meta, !source.youtube)) continue;
-    hits.push({ url: url.trim(), title: candidate.title, score: scoreSearchHit(candidate.title, meta) });
+    if (isNotStudioVersion(candidate.title, meta)) continue;
+    if (meta.duration && candidate.duration) {
+      const tolerance = Math.max(10, meta.duration * 0.07);
+      if (Math.abs(candidate.duration - meta.duration) > tolerance) continue;
+    }
+    hits.push({
+      url: url.trim(),
+      title: candidate.title,
+      score: scoreSearchHit(candidate.title, meta, candidate.uploader),
+    });
   }
 
   hits.sort((a, b) => b.score - a.score);
@@ -319,7 +382,9 @@ async function runYtDlp(
   args: string[],
   ffmpeg: string | null,
 ): Promise<string> {
-  const { stdout } = await execFileAsync(ytdlp, args, {
+  // Windows: bez --encoding vypisuje yt-dlp v kódování konzole (cp1250) a české názvy
+  // se rozbijí („Nemáš zač“ → „Nem� za�“) — pak nesedí s názvem ze Spotify.
+  const { stdout } = await execFileAsync(ytdlp, ["--encoding", "utf-8", ...args], {
     maxBuffer: 20 * 1024 * 1024,
     timeout: 180_000,
     env: ytdlpEnv(ytdlp, ffmpeg),

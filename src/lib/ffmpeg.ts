@@ -119,27 +119,38 @@ export async function probeDuration(filepath: string): Promise<number | null> {
     const seconds = parseFloat(stdout.trim());
     return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
   } catch {
-    try {
-      await execFileAsync(
-        ffmpeg,
-        ["-i", filepath, "-f", "null", "-"],
-        { timeout: 60_000 },
-      );
-    } catch (error: unknown) {
-      const stderr =
-        error && typeof error === "object" && "stderr" in error
-          ? String((error as { stderr: Buffer }).stderr)
-          : "";
-      const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
-      if (!match) return null;
-      const hours = parseInt(match[1], 10);
-      const minutes = parseInt(match[2], 10);
-      const seconds = parseFloat(match[3]);
-      const total = hours * 3600 + minutes * 60 + seconds;
-      return total > 0 ? total : null;
-    }
-    return null;
+    // ffprobe chybí (např. ffprobe-static nemá arm64) — délku zjistí ffmpeg.
+    const header = await ffmpegStderr(ffmpeg, ["-hide_banner", "-i", filepath]);
+    const fromHeader = parseClock(header.match(/Duration:\s*(\d+:\d+:\d+(?:\.\d+)?)/)?.[1]);
+    if (fromHeader) return fromHeader;
+
+    // Hlavička bez délky (webm z MediaRecorderu) — dekódovat a vzít poslední time=.
+    const decoded = await ffmpegStderr(
+      ffmpeg,
+      ["-hide_banner", "-i", filepath, "-vn", "-f", "null", "-"],
+      120_000,
+    );
+    const times = [...decoded.matchAll(/time=(\d+:\d+:\d+(?:\.\d+)?)/g)];
+    return parseClock(times.at(-1)?.[1]);
   }
+}
+
+async function ffmpegStderr(ffmpeg: string, args: string[], timeout = 30_000): Promise<string> {
+  try {
+    const { stderr } = await execFileAsync(ffmpeg, args, { timeout, maxBuffer: 8 * 1024 * 1024 });
+    return String(stderr);
+  } catch (error: unknown) {
+    return error && typeof error === "object" && "stderr" in error
+      ? String((error as { stderr: unknown }).stderr)
+      : "";
+  }
+}
+
+function parseClock(value: string | undefined): number | null {
+  if (!value) return null;
+  const [h, m, s] = value.split(":");
+  const total = parseInt(h, 10) * 3600 + parseInt(m, 10) * 60 + parseFloat(s);
+  return Number.isFinite(total) && total > 0 ? total : null;
 }
 
 export function getCrossfadeSec(): number {

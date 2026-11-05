@@ -8,9 +8,15 @@ export async function POST(request: Request) {
   const ticket = encodeURIComponent(makeMicTicket());
   // Stejný origin jako web: prohlížeč si doplní ws/wss a host sám (funguje i za HTTPS proxy).
   if (isMicSameOrigin()) {
-    return Response.json({ path: `/mic?t=${ticket}` }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json(
+      { path: `/mic?t=${ticket}`, monitorPath: `/monitor?t=${ticket}` },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   }
   const base = getMicWsUrl(request.headers.get("host"));
-  const url = `${base}${base.includes("?") ? "&" : "?"}t=${ticket}`;
-  return Response.json({ url }, { headers: { "Cache-Control": "no-store" } });
+  const withTicket = (u: string) => `${u}${u.includes("?") ? "&" : "?"}t=${ticket}`;
+  return Response.json(
+    { url: withTicket(base), monitorUrl: withTicket(base.replace(/\/mic(\?|$)/, "/monitor$1")) },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }

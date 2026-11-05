@@ -1,5 +1,6 @@
 import http from "node:http";
 import { loadEnvFiles } from "../src/lib/load-env";
+import { installConsoleFormat } from "../src/lib/radio-log";
 import { getStreamPort } from "../src/lib/radio-broker";
 import {
   refreshBroadcastLock,
@@ -8,6 +9,7 @@ import {
 } from "../src/lib/radio-state";
 
 loadEnvFiles();
+installConsoleFormat();
 
 console.log("[broadcaster] Spouštím HTTP…");
 

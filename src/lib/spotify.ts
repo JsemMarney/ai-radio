@@ -19,7 +19,10 @@ export type SpotifyPlaylistMeta = {
   truncated: boolean;
 };
 
-export const PLAYLIST_IMPORT_LIMIT = 50;
+/** Kolik skladeb z playlistu/alba se načte celkem. */
+export const PLAYLIST_IMPORT_LIMIT = 500;
+/** Delší playlist se rozdělí na importy po tolika skladbách (stahují se postupně). */
+export const IMPORT_CHUNK_SIZE = 50;
 
 function isSpotifyHost(hostname: string): boolean {
   return (
@@ -358,4 +361,19 @@ export async function fetchSpotifyAlbum(
 
 export function searchQueryForTrack(meta: SpotifyTrackMeta): string {
   return `${meta.artist} - ${meta.title}`.trim();
+}
+
+/** Hledání skladeb na Spotify (návrhy posluchačů — co v rádiu chybí). */
+export async function searchSpotifyTracks(query: string, limit = 8): Promise<SpotifyTrackMeta[]> {
+  const q = query.trim().slice(0, 100);
+  if (q.length < 2) return [];
+  const token = await getSpotifyToken();
+  const params = new URLSearchParams({ q, type: "track", limit: String(Math.min(limit, 20)), market: "CZ" });
+  const res = await fetch(`https://api.spotify.com/v1/search?${params}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Spotify hledání selhalo (${res.status}).`);
+  const data = (await res.json()) as { tracks?: { items?: SpotifyApiTrack[] } };
+  return (data.tracks?.items ?? []).filter(Boolean).map(mapTrack);
 }

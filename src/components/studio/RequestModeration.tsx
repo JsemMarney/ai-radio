@@ -23,8 +23,10 @@ const STATUS_LABEL: Record<ListenerRequest["status"], string> = {
 
 /** Přání posluchačů ke schválení — moderátor rozhodne, co zazní. */
 export function RequestModeration() {
-  const { moderationPending } = useRadio();
+  const { moderationPending, nowPlaying } = useRadio();
+  const playingUuid = nowPlaying?.uuid ?? null;
   const [pending, setPending] = useState<ListenerRequest[]>([]);
+  const [approved, setApproved] = useState<ListenerRequest[]>([]);
   const [recent, setRecent] = useState<ListenerRequest[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -33,8 +35,13 @@ export function RequestModeration() {
     try {
       const res = await fetch("/api/radio/requests/moderation", { cache: "no-store" });
       if (!res.ok) return;
-      const data = (await res.json()) as { pending?: ListenerRequest[]; recent?: ListenerRequest[] };
+      const data = (await res.json()) as {
+        pending?: ListenerRequest[];
+        approved?: ListenerRequest[];
+        recent?: ListenerRequest[];
+      };
       setPending(data.pending ?? []);
+      setApproved(data.approved ?? []);
       setRecent(data.recent ?? []);
     } catch {
       // offline
@@ -49,7 +56,7 @@ export function RequestModeration() {
       clearTimeout(first);
       clearInterval(timer);
     };
-  }, [load, moderationPending]);
+  }, [load, moderationPending, playingUuid]);
 
   async function decide(id: string, approve: boolean) {
     setBusyId(id);
@@ -82,7 +89,7 @@ export function RequestModeration() {
       </div>
 
       {!pending.length ? (
-        <p className="text-sm text-[var(--ink-muted)]">Žádné nové přání. Neschválená propadnou po 30 min.</p>
+        <p className="text-sm text-[var(--ink-muted)]">Žádné nové přání. Když přání do 15 min nevyřídíš, schválí se samo a hlasovka zazní se začátkem skladby.</p>
       ) : (
         <ul className="space-y-3">
           {pending.map((r) => (
@@ -133,6 +140,40 @@ export function RequestModeration() {
       )}
 
       {error ? <p className="mt-3 text-sm text-[var(--danger)]" role="alert">{error}</p> : null}
+
+      {approved.length ? (
+        <div className="mt-6">
+          <h3 className="label no-mark mb-3">Schválená · na řadě</h3>
+          <ol className="space-y-3">
+            {approved.map((r, i) => (
+              <li key={r.id} className="rounded-xl bg-[var(--bg-deep)]/60 p-3">
+                <div className="flex items-center gap-3">
+                  <span className="w-5 shrink-0 text-center text-sm font-bold tabular-nums text-[var(--accent)]">
+                    {i + 1}
+                  </span>
+                  <Cover src={r.thumbnail} size="sm" className="rounded-[2px]" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm">{r.title}</p>
+                    <p className="truncate text-xs text-[var(--ink-muted)]">
+                      {r.artist}
+                      {r.autoApproved ? <span className="text-[var(--accent-soft)]"> · schváleno automaticky</span> : null}
+                    </p>
+                  </div>
+                </div>
+                {r.from || r.message ? (
+                  <div className="mt-3 border-l-2 border-[var(--accent)] pl-3">
+                    {r.message ? <p className="text-sm leading-snug">„{r.message}“</p> : null}
+                    <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
+                      {r.from ? `od ${r.from}` : "bez podpisu"}
+                    </p>
+                  </div>
+                ) : null}
+                {r.hasVoice ? <VoiceNoteControls id={r.id} sec={r.voiceSec} /> : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
 
       {recent.length ? (
         <details className="mt-4">

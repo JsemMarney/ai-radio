@@ -86,10 +86,20 @@ function prefersLightStream(): boolean {
   return window.matchMedia?.("(pointer: coarse)").matches ?? false;
 }
 
+/** Kvalitu volí přehrávač sám — staré ruční nastavení se zahodí. */
 function readStoredQuality(): StreamQuality {
   if (typeof window === "undefined") return "auto";
-  const raw = localStorage.getItem(QUALITY_KEY);
-  return raw === "high" || raw === "low" ? raw : "auto";
+  try {
+    localStorage.removeItem(QUALITY_KEY);
+  } catch {
+    // storage nedostupný
+  }
+  return "auto";
+}
+
+/** Posuvník je lineární, ucho ne — kvadratická křivka dá přirozené ztlumení. */
+function toGain(volume: number): number {
+  return volume * volume;
 }
 
 function readStoredVolume(): number {
@@ -137,6 +147,10 @@ type RadioContextValue = {
   bedLevelDb: number;
   /** Jméno moderátora (null = nezobrazovat). */
   moderator: string | null;
+  /** Moderátor se nedávno ozval — jinak posluchači vidí AutoDJ. */
+  moderatorOnAir: boolean;
+  /** Vlastní texty do běžícího pruhu. */
+  tickerMessages: string[];
   play: () => void;
   pause: () => void;
   toggle: () => void;
@@ -171,6 +185,8 @@ type StatusPayload = {
   bed?: string;
   bedLevelDb?: number;
   moderator?: string | null;
+  moderatorOnAir?: boolean;
+  tickerMessages?: string[];
 };
 
 const CONNECTION_DEBOUNCE_MS = 800;
@@ -210,6 +226,8 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const [bed, setBed] = useState("builtin");
   const [bedLevelDb, setBedLevelDb] = useState(-10);
   const [moderator, setModerator] = useState<string | null>(null);
+  const [moderatorOnAir, setModeratorOnAir] = useState(false);
+  const [tickerMessages, setTickerMessages] = useState<string[]>([]);
   const [quality, setQualityState] = useState<StreamQuality>("auto");
   const [formats, setFormats] = useState<{ mp3: number; aac: number | null }>({
     mp3: 0,
@@ -223,9 +241,14 @@ export function RadioProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(VOLUME_KEY, String(next));
     }
     if (audioRef.current) {
-      audioRef.current.volume = next;
+      audioRef.current.volume = toGain(next);
     }
   }, []);
+
+  // Hlasitost z posuvníku platí vždy — i po načtení uložené hodnoty a před startem.
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = toGain(volume);
+  }, [volume]);
 
   const applyStatus = useCallback((data: StatusPayload) => {
     if (data.sessionId !== undefined && data.sessionId !== sessionIdRef.current) {
@@ -294,6 +317,8 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     if (data.bed !== undefined) setBed(data.bed);
     if (data.bedLevelDb !== undefined) setBedLevelDb(data.bedLevelDb);
     if (data.moderator !== undefined) setModerator(data.moderator);
+    if (data.moderatorOnAir !== undefined) setModeratorOnAir(data.moderatorOnAir);
+    if (data.tickerMessages !== undefined) setTickerMessages(data.tickerMessages);
     if (data.formats) {
       const f = data.formats;
       setFormats((prev) =>
@@ -494,6 +519,9 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const play = useCallback(() => {
     const el = audioRef.current;
     if (!el) return;
+    // Start s ztlumeným posuvníkem by vypadal jako nefunkční rádio.
+    if (volume < 0.05) setVolume(DEFAULT_VOLUME);
+    el.volume = toGain(volume < 0.05 ? DEFAULT_VOLUME : volume);
     void connectStream().then((ok) => {
       if (!ok) return;
       void el.play().catch(() => {
@@ -501,7 +529,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         setConnection("idle");
       });
     });
-  }, [connectStream]);
+  }, [connectStream, volume, setVolume]);
 
   // Vybrat formát podle nastavení kvality a toho, co stanice umí.
   const wantsLight =
@@ -603,6 +631,8 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         bed,
         bedLevelDb,
         moderator,
+        moderatorOnAir,
+        tickerMessages,
         play,
         pause,
         toggle,

@@ -40,6 +40,8 @@ export type ListenerRequest = {
   playedAt?: string;
   /** Posluchač přiložil hlasovku (downloads/_voice/<id>.mp3). */
   hasVoice?: boolean;
+  /** Moderátor nerozhodl včas → schváleno automaticky (hlasovka zazní se začátkem skladby). */
+  autoApproved?: boolean;
   voiceSec?: number;
 };
 

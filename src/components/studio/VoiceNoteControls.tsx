@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { VoicePreview } from "@/components/player/VoicePreview";
 
 async function postPlay(body: Record<string, unknown>): Promise<string | null> {
   try {
@@ -44,12 +45,7 @@ export function VoiceNoteControls({ id, sec }: { id: string; sec?: number }) {
         Hlasovka{sec ? ` · ${sec} s` : ""} — poslechni si ji ve sluchátkách, než ji pustíš.
       </p>
       <div className="flex flex-wrap items-center gap-2">
-        <audio
-          src={`/api/radio/requests/voice?id=${id}`}
-          controls
-          preload="none"
-          className="h-9 max-w-full"
-        />
+        <VoicePreview src={`/api/radio/requests/voice?id=${id}`} durationSec={sec} preload="none" />
         {onAir ? (
           <button
             type="button"

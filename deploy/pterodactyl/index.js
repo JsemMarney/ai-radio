@@ -150,9 +150,9 @@ function startBroadcaster() {
 
 // ───────── web + mikrofon na jednom portu ─────────
 
-/** WebSocket mikrofonu (/mic) přeposlat na broadcaster beze změny. */
+/** WebSockety studia (/mic, /monitor) přeposlat na broadcaster beze změny. */
 function proxyMicUpgrade(req, socket, head) {
-  if (!req.url || !req.url.startsWith("/mic")) {
+  if (!req.url || !/^\/(mic|monitor)(\?|$)/.test(req.url)) {
     socket.destroy();
     return;
   }

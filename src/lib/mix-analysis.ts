@@ -238,34 +238,38 @@ export function planTransition(
   const fadeLen = Math.max(0, end - a.outroAt);
   const quietIntro = b ? clamp(b.introAt, 0, 8) : 0;
   const hasQuietIntro = quietIntro >= 1.5;
+  // Rádiový přechod: A vždy plynule dojíždí a B pod ní nabíhá — nikdy tvrdý střih.
+  const target = clamp(maxCrossfadeSec, 3, Math.max(3, limit));
+  // B s tichým začátkem nabíhá sama; jinak ji vytáhnout pomalu, ať nevskočí do konce A.
+  const fadeIn = (overlap: number) => (hasQuietIntro ? Math.min(1, overlap * 0.3) : Math.max(2, overlap * 0.6));
 
   if (fadeLen >= 3) {
     // A si sama doznívá → B nastoupí, když fade klesne zhruba na půl.
-    const overlap = clamp(end - a.mixAt, 1.5, limit);
+    const overlap = clamp(Math.max(end - a.mixAt, target * 0.75), 3, Math.max(3, limit));
     return {
       overlapSec: overlap,
       fadeOutSec: overlap,
-      fadeInSec: hasQuietIntro ? 0.05 : Math.min(1.5, overlap * 0.5),
+      fadeInSec: fadeIn(overlap),
       kind: "natural-fade",
     };
   }
 
   if (fadeLen < 1.2) {
-    // Tvrdý konec (poslední úder) — nechat dohrát, nestahovat.
-    const overlap = hasQuietIntro ? Math.min(quietIntro, 4, limit) : 0.35;
+    // Tvrdý konec — stáhnout A přes posledních pár sekund a B pustit pod ni.
+    const overlap = clamp(Math.min(target, 5), 3, Math.max(3, limit));
     return {
       overlapSec: overlap,
-      fadeOutSec: 0.35,
-      fadeInSec: hasQuietIntro ? 0.05 : 0.05,
+      fadeOutSec: overlap,
+      fadeInSec: fadeIn(overlap),
       kind: "hard-end",
     };
   }
 
-  const blend = clamp(Math.max(fadeLen, hasQuietIntro ? quietIntro : 0), 1.5, Math.min(limit, maxCrossfadeSec));
+  const overlap = clamp(Math.max(fadeLen, target, hasQuietIntro ? quietIntro : 0), 3, Math.max(3, limit));
   return {
-    overlapSec: blend,
-    fadeOutSec: clamp(fadeLen, 1.2, blend),
-    fadeInSec: hasQuietIntro ? 0.05 : blend * 0.5,
+    overlapSec: overlap,
+    fadeOutSec: overlap,
+    fadeInSec: fadeIn(overlap),
     kind: "blend",
   };
 }

@@ -1,20 +1,27 @@
 @import "tailwindcss";
 
 :root {
-  --bg-deep: #120b0a;
-  --bg-mid: #1b1110;
-  --bg-panel: #241614;
-  --bg-elevated: #2e1c19;
-  --ink: #f4ece2;
-  --ink-muted: #b09c92;
-  --ink-faint: #76635b;
-  --accent: #e5322d;
-  --accent-soft: #ff6b55;
-  --line: rgba(244, 236, 226, 0.09);
-  --line-strong: rgba(244, 236, 226, 0.2);
-  --danger: #ff6b55;
-  --on-air: #e5322d;
-  --ok: #8fd19e;
+  /* Noční fialová + malinová a jantarová — teplé, ale ne „hnědé“. */
+  --bg-deep: #0c0a12;
+  --bg-mid: #15121d;
+  --bg-panel: #1f1a2a;
+  --bg-elevated: #292237;
+  --ink: #f7f3fc;
+  --ink-muted: #b5acc6;
+  --ink-faint: #786e8c;
+  --accent: #ff3d6e;
+  --accent-soft: #ff7f9c;
+  --accent-2: #ffb347;
+  --line: rgba(247, 243, 252, 0.08);
+  --line-strong: rgba(247, 243, 252, 0.18);
+  --danger: #ff6b6b;
+  --on-air: #ff3d6e;
+  --ok: #7ee0a8;
+  /* Barva z obalu právě hrající skladby (nastavuje přehrávač). */
+  --tint: 120 70 200;
+  --font-sans: var(--font-montserrat), system-ui, sans-serif;
+  --font-display: var(--font-montserrat), system-ui, sans-serif;
+  --font-mono: var(--font-montserrat), system-ui, sans-serif;
 }
 
 @theme inline {
@@ -30,7 +37,52 @@ body {
   min-height: 100vh;
   color: var(--ink);
   background: var(--bg-deep);
-  font-family: var(--font-sans), system-ui, sans-serif;
+  font-family: var(--font-sans);
+}
+
+/* Barevná záře v pozadí — přebírá barvu z obalu skladby a plynule se mění. */
+.ambient {
+  background-attachment: fixed;
+  background:
+    radial-gradient(60rem 40rem at 15% -10%, rgb(var(--tint) / 0.35), transparent 70%),
+    radial-gradient(50rem 36rem at 100% 20%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%),
+    radial-gradient(46rem 34rem at 50% 115%, color-mix(in srgb, var(--accent-2) 12%, transparent), transparent 70%),
+    var(--bg-deep);
+  background-attachment: fixed;
+}
+
+/* Skleněné karty nad září */
+.glass {
+  background: color-mix(in srgb, var(--bg-mid) 72%, transparent);
+  border: 1px solid var(--line);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 20px 50px -24px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+
+/* Hlavní tlačítko — přechod malinová → jantarová se září */
+.btn-glow {
+  background: linear-gradient(120deg, var(--accent), color-mix(in srgb, var(--accent) 55%, var(--accent-2)));
+  box-shadow: 0 10px 30px -10px color-mix(in srgb, var(--accent) 70%, transparent);
+  transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease;
+}
+
+.btn-glow:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 14px 36px -10px color-mix(in srgb, var(--accent) 85%, transparent);
+}
+
+.btn-glow:active {
+  transform: scale(0.98);
+}
+
+.text-gradient {
+  background: linear-gradient(100deg, var(--ink) 30%, var(--accent-soft));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 * {
@@ -85,36 +137,59 @@ body {
 
 .label {
   font-family: var(--font-display), sans-serif;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  letter-spacing: 0.12em;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-muted);
 }
 
-/* Hlasitost */
+/* Hlasitost — vyplněná část ukazuje nastavenou úroveň */
 input[type="range"].broadcast-range {
   -webkit-appearance: none;
   appearance: none;
-  height: 2px;
-  background: var(--line-strong);
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent-2) 0,
+    var(--accent) var(--fill, 0%),
+    var(--line-strong) var(--fill, 0%) 100%
+  );
   cursor: pointer;
 }
 
 input[type="range"].broadcast-range::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: var(--ink);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transition: transform 0.15s;
 }
 
 input[type="range"].broadcast-range::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   border: none;
   border-radius: 50%;
   background: var(--ink);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transition: transform 0.15s;
+}
+
+input[type="range"].broadcast-range:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+
+input[type="range"].broadcast-range:hover::-moz-range-thumb {
+  transform: scale(1.15);
+}
+
+input[type="range"].broadcast-range:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
 }
 
 /* Ekvalizér v "právě hraje" — jen když opravdu hraje */

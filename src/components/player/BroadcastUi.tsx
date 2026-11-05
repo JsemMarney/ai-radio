@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { RadioNowPlaying, StationConfig } from "@/lib/types";
 
 export function StationHeader({
@@ -56,15 +56,18 @@ function listenersLabel(n: number): string {
 export function LiveBadge({
   live,
   listeners,
+  lamp = true,
 }: {
   live: boolean;
   listeners: number;
+  /** Ukázat ON AIR lampu (přehrávač ji nemá). */
+  lamp?: boolean;
 }) {
   return (
     <div className="flex items-center gap-3">
-      <OnAirLamp live={live} />
+      {lamp ? <OnAirLamp live={live} /> : null}
       {live ? (
-        <span className="text-xs text-[var(--ink-muted)]">
+        <span className="hidden text-xs text-[var(--ink-muted)] sm:inline">
           {listenersLabel(listeners)}
         </span>
       ) : null}
@@ -114,48 +117,67 @@ export function Cover({
   );
 }
 
+/** Hlavní karta: obal vlevo, skladba + ovládání vpravo. */
 export function NowPlaying({
   track,
   placeholder,
-  playing,
+  aside,
   children,
 }: {
   track: RadioNowPlaying | null;
   placeholder: string;
-  playing: boolean;
+  /** Malá poznámka vpravo nahoře (kdo moderuje). */
+  aside?: ReactNode;
+  /** Průběh, tlačítko a hlasitost pod názvem. */
   children?: ReactNode;
 }) {
   const title = track?.title ?? placeholder;
   return (
-    <div>
-      <div className="cover-plate mr-3 mb-3">
-        <Cover src={track?.thumbnail} size="lg" className="rounded-[4px]" />
-      </div>
-      <div className="mt-5 flex items-center gap-2">
-        <LevelMeter active={playing} />
-        <span className="label no-mark">Právě hraje</span>
-        {track?.requested ? (
-          <span className="text-xs text-[var(--accent)]">· na přání</span>
-        ) : null}
-      </div>
-      <h1
-        className={`mt-2 font-[family-name:var(--font-display)] font-semibold leading-[1.05] text-[var(--ink)] ${
-          title.length > 34 ? "text-3xl sm:text-4xl" : "text-4xl sm:text-5xl lg:text-6xl"
-        }`}
-      >
-        {title}
-      </h1>
-      {track ? (
-        <p className="mt-2 text-lg text-[var(--ink)]/85">{track.artist}</p>
+    <div className="glass relative overflow-hidden rounded-3xl">
+      {track?.thumbnail ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={track.thumbnail}
+          alt=""
+          aria-hidden
+          className="pointer-events-none absolute inset-0 h-full w-full scale-125 object-cover opacity-30 blur-3xl saturate-150"
+        />
       ) : null}
-      {track?.album && track.album.toLowerCase() !== track.title.toLowerCase() ? (
-        <p className="mt-0.5 text-sm text-[var(--ink-muted)]">
-          {track.album}
-          {track.year ? `, ${track.year}` : ""}
-        </p>
+      <div className="relative grid gap-5 p-5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:gap-8 sm:p-8 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
+        <Cover
+          src={track?.thumbnail}
+          size="lg"
+          className="mx-auto max-w-[15rem] rounded-2xl shadow-[0_24px_60px_-18px_rgb(var(--tint)/0.65)] ring-1 ring-white/10 sm:max-w-none"
+        />
+        <div className="flex min-w-0 flex-col justify-center">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <div className="flex items-center gap-2">
+              {track?.requested ? (
+                <span className="rounded-full bg-[var(--accent)]/15 px-2 py-0.5 text-[11px] font-semibold text-[var(--accent-soft)]">
+                  na přání
+                </span>
+              ) : null}
+            </div>
+            {aside}
+          </div>
+          <h1
+            className={`text-gradient mt-3 font-extrabold leading-tight tracking-tight ${
+              title.length > 34 ? "text-2xl sm:text-3xl" : "text-3xl sm:text-4xl"
+            }`}
+          >
+            {title}
+          </h1>
+          {track ? (
+            <p className="mt-1 text-base font-medium text-[var(--ink)]/85 sm:text-lg">{track.artist}</p>
+          ) : null}
+          {children}
+        </div>
+      </div>
+      {track?.dedication ? (
+        <div className="relative border-t border-[var(--line)] px-5 pb-5 sm:px-8 sm:pb-6">
+          <DedicationNote dedication={track.dedication} />
+        </div>
       ) : null}
-      {track?.dedication ? <DedicationNote dedication={track.dedication} /> : null}
-      {children}
     </div>
   );
 }
@@ -172,7 +194,7 @@ export function DedicationNote({
   title?: string;
 }) {
   return (
-    <figure className="mt-6 rounded-[4px] bg-[var(--bg-panel)] px-[18px] py-4">
+    <figure className="mt-6 rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/70 px-[18px] py-4">
       {title ? (
         <p className="mb-2 font-[family-name:var(--font-display)] text-xs font-semibold uppercase tracking-[0.14em] text-[var(--accent-soft)]">
           {title}
@@ -210,7 +232,7 @@ export function ListenButton({
     <button
       type="button"
       onClick={onToggle}
-      className="inline-flex h-12 items-center gap-3 rounded-full bg-[var(--accent)] pl-4 pr-6 font-[family-name:var(--font-display)] text-base font-semibold uppercase tracking-wider text-[var(--ink)] transition-colors hover:bg-[var(--accent-soft)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+      className="btn-glow inline-flex h-12 items-center gap-3 rounded-full pl-4 pr-6 font-[family-name:var(--font-display)] text-base font-semibold uppercase tracking-wider text-[var(--ink)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
       aria-label={playing ? "Zastavit" : "Poslouchat živě"}
     >
       {playing ? (
@@ -241,10 +263,10 @@ export function VolumeControl({
       <button
         type="button"
         onClick={onToggleMute}
-        className="flex h-8 w-8 shrink-0 items-center justify-center text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[var(--ink)] transition-colors hover:bg-[var(--ink)]/10"
         aria-label={volume > 0 ? "Ztlumit" : "Zapnout zvuk"}
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
           <path d="M11 5L6 9H3v6h3l5 4V5z" />
           {volume === 0 ? (
             <path d="M16 9l5 5M21 9l-5 5" />
@@ -264,7 +286,9 @@ export function VolumeControl({
         value={volume}
         onChange={(e) => onChange(Number(e.target.value))}
         className="broadcast-range flex-1"
+        style={{ "--fill": `${Math.round(volume * 100)}%` } as CSSProperties}
         aria-label="Hlasitost"
+        aria-valuetext={`${Math.round(volume * 100)} %`}
       />
     </div>
   );
@@ -351,25 +375,20 @@ export function ProgramLog({
   title,
   tracks,
 }: {
-  title: string;
+  title?: string;
   tracks: RadioNowPlaying[];
   variant?: "upcoming" | "recent";
 }) {
   if (!tracks.length) return null;
   return (
     <section>
-      <h2 className="label mb-2">{title}</h2>
+      {title ? <h2 className="label mb-2">{title}</h2> : null}
       <ul>
         {tracks.map((track) => (
           <LogRow
             key={`${track.uuid}-${track.startedAt ?? ""}`}
             time={<LogTime iso={track.startedAt} />}
             track={track}
-            aside={
-              <span className="shrink-0 font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--ink-faint)]">
-                {formatLength(track.durationSec)}
-              </span>
-            }
           />
         ))}
       </ul>

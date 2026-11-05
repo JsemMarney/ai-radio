@@ -302,7 +302,11 @@ export function MicPanel() {
 
       <ModeratorName current={moderator} />
 
-      <div className="mt-5 grid gap-4 sm:grid-cols-2">
+      <details className="group mt-5">
+        <summary className="cursor-pointer list-none text-xs font-semibold text-[var(--ink-muted)] hover:text-[var(--ink)]">
+          <span className="inline-block transition-transform group-open:rotate-90">›</span> Nastavení zvuku
+        </summary>
+      <div className="mt-3 grid gap-4 sm:grid-cols-2">
         <label className="text-xs text-[var(--ink-muted)]">
           Hudba když mluvíš
           <select
@@ -339,15 +343,17 @@ export function MicPanel() {
           />
         </label>
       </div>
+        <p className="mt-3 text-xs text-[var(--ink-faint)]">
+          Hudba se sama ztlumí, když mluvíš, a vrátí se po chvilce ticha. Posluchači tě slyší
+          se zpožděním pár sekund.
+        </p>
+      </details>
 
       {error ? (
         <p className="mt-3 text-sm text-[var(--danger)]" role="alert">{error}</p>
-      ) : (
-        <p className="mt-3 text-xs text-[var(--ink-faint)]">
-          Používej sluchátka. Hudba se sama ztlumí, když mluvíš, a vrátí se po chvilce ticha.
-          Posluchači tě slyší se zpožděním pár sekund.
-        </p>
-      )}
+      ) : !live ? (
+        <p className="mt-3 text-xs text-[var(--ink-faint)]">Používej sluchátka.</p>
+      ) : null}
     </section>
   );
 }

@@ -1,28 +1,15 @@
 import type { Metadata } from "next";
 import { connection } from "next/server";
 import type { CSSProperties } from "react";
-import { Barlow, Barlow_Condensed, IBM_Plex_Mono } from "next/font/google";
+import { Montserrat } from "next/font/google";
 import { RadioProvider } from "@/components/RadioProvider";
 import { getStationConfig } from "@/lib/station-config";
 import "./globals.css";
 
-const sans = Barlow({
-  variable: "--font-sans",
+// Montserrat všude — text, nadpisy i čísla (globals.css z něj skládá --font-sans/display/mono).
+const montserrat = Montserrat({
+  variable: "--font-montserrat",
   subsets: ["latin", "latin-ext"],
-  weight: ["400", "500", "600"],
-});
-
-const display = Barlow_Condensed({
-  variable: "--font-display",
-  subsets: ["latin", "latin-ext"],
-  weight: ["600"],
-});
-
-const mono = IBM_Plex_Mono({
-  variable: "--font-mono",
-  subsets: ["latin", "latin-ext"],
-  weight: ["400", "500"],
-  preload: false,
 });
 
 const station = getStationConfig();
@@ -38,7 +25,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="cs"
-      className={`${sans.variable} ${display.variable} ${mono.variable} h-full antialiased`}
+      className={`${montserrat.variable} h-full antialiased`}
       style={
         {
           "--accent": station.colorAccent,

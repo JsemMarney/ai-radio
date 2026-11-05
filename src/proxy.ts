@@ -16,6 +16,7 @@ const PROTECTED_PREFIXES = [
   "/api/jobs",
   "/api/audio",
   "/api/studio/health",
+  "/api/studio/suggestions",
   "/api/radio/skip",
   "/api/radio/play",
   "/api/radio/queue/remove",
@@ -30,6 +31,11 @@ const PROTECTED_PREFIXES = [
   "/api/radio/requests/voice",
   "/api/radio/requests/play-voice",
   "/api/radio/moderator",
+  "/api/radio/ticker",
+  "/api/radio/listener-stats",
+  "/api/radio/ai-dj",
+  "/api/radio/schedule",
+  "/api/studio/messages",
   "/api/radio/test-transition",
   "/api/radio/test-midsong",
   "/api/radio/transition-preview",
@@ -129,7 +135,15 @@ async function authorize(request: NextRequest): Promise<NextResponse | null> {
   return NextResponse.redirect(loginUrl);
 }
 
+/** Aplikace nemá server actions — požadavky s Next-Action posílají jen skenery a plní log chybami. */
+function isServerActionProbe(request: NextRequest): boolean {
+  return request.headers.has("next-action");
+}
+
 export async function proxy(request: NextRequest) {
+  if (isServerActionProbe(request)) {
+    return new NextResponse(null, { status: 404 });
+  }
   const { pathname } = request.nextUrl;
   const isApi = pathname.startsWith("/api/");
 

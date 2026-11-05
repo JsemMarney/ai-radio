@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { VoicePreview } from "@/components/player/VoicePreview";
 
 const MAX_SEC = 30;
 
@@ -104,11 +105,18 @@ export function VoiceRecorder({
         Hlasovka <span className="text-[var(--ink-faint)]">(nepovinné, max. {MAX_SEC} s)</span>
       </p>
       {value ? (
-        <div className="mt-2 flex flex-wrap items-center gap-3">
-          <audio src={value.url} controls preload="metadata" className="h-9 max-w-full" />
-          <span className="font-[family-name:var(--font-mono)]">{value.sec} s</span>
-          <button type="button" onClick={remove} className="hover:text-[var(--ink)]">
-            Smazat
+        <div className="mt-2 flex items-center gap-2">
+          <VoicePreview src={value.url} durationSec={value.sec} />
+          <button
+            type="button"
+            onClick={remove}
+            aria-label="Smazat hlasovku"
+            title="Smazat"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[var(--ink-muted)] transition-colors hover:bg-[var(--ink)]/10 hover:text-[var(--danger)]"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12M9 7V4h6v3" />
+            </svg>
           </button>
         </div>
       ) : state === "recording" ? (

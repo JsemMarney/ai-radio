@@ -8,9 +8,10 @@ export function isRequestModerationEnabled(): boolean {
   return process.env.RADIO_REQUESTS_MODERATION !== "0";
 }
 
+/** Přání jsou zapnutá, pokud je RADIO_REQUESTS výslovně nevypne (0 / false / off). */
 export function areSongRequestsEnabled(): boolean {
   const flag = process.env.RADIO_REQUESTS?.trim().toLowerCase();
-  return flag === "1" || flag === "true" || flag === "on";
+  return !(flag === "0" || flag === "false" || flag === "off");
 }
 
 export function getMaxRequestQueue(): number {

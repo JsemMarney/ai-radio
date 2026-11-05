@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  type CSSProperties,
   type DragEvent,
   type FormEvent,
   type ReactNode,
@@ -25,6 +26,13 @@ import { TrackTimeline } from "@/components/ProgramSchedule";
 import { BreakPanel } from "@/components/studio/BreakPanel";
 import { MicPanel } from "@/components/studio/MicPanel";
 import { RequestModeration } from "@/components/studio/RequestModeration";
+import { AiDjPanel } from "@/components/studio/AiDjPanel";
+import { ListenerChart } from "@/components/studio/ListenerChart";
+import { MessagesPanel } from "@/components/studio/MessagesPanel";
+import { SchedulePanel } from "@/components/studio/SchedulePanel";
+import { SuggestionsPanel } from "@/components/studio/SuggestionsPanel";
+import { TickerPanel } from "@/components/studio/TickerPanel";
+import { useStudioMonitor } from "@/components/studio/useStudioMonitor";
 import { VoiceNoteControls } from "@/components/studio/VoiceNoteControls";
 import { useRadio } from "@/components/RadioProvider";
 import type {
@@ -39,9 +47,10 @@ import type {
   StudioQueueItem,
 } from "@/lib/types";
 
-type Tab = "library" | "stats" | "import" | "system";
+type Tab = "live" | "library" | "stats" | "import" | "system";
 
 const TABS: [Tab, string][] = [
+  ["live", "Vysílání"],
   ["library", "Knihovna"],
   ["stats", "Statistiky"],
   ["import", "Import"],
@@ -112,6 +121,12 @@ function TextButton({
   );
 }
 
+/**
+ * Firefox si po obnovení stránky pamatuje stav tlačítek (disabled) a React pak hlásí
+ * hydration error. HTML atribut autocomplete="off" to vypne (React typy ho u <button> neznají, proto spread).
+ */
+const NO_STATE_RESTORE = { autoComplete: "off" } as Record<string, string>;
+
 function OutlineButton({
   children,
   onClick,
@@ -130,6 +145,7 @@ function OutlineButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
+      {...NO_STATE_RESTORE}
       className={`rounded-full px-4 py-1.5 text-sm transition-colors disabled:opacity-40 ${
         primary
           ? "bg-[var(--accent)] font-medium text-[var(--bg-deep)] hover:bg-[var(--accent-soft)]"
@@ -145,9 +161,12 @@ function OutlineButton({
 function TimeLeft({
   trackStartedAt,
   durationSec,
+  aheadSec = 0,
 }: {
   trackStartedAt: string | null;
   durationSec: number | null;
+  /** Přímý odposlech je napřed před posluchači — odpočet podle toho, co slyší moderátor. */
+  aheadSec?: number;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -156,35 +175,36 @@ function TimeLeft({
   }, []);
   const started = trackStartedAt ? Date.parse(trackStartedAt) : NaN;
   if (!durationSec || !Number.isFinite(started)) return null;
-  const left = Math.max(0, Math.round(durationSec - (now - started) / 1000));
+  const left = Math.max(0, Math.round(durationSec - (now - started) / 1000 - aheadSec));
   const soon = left <= 30;
   return (
-    <>
-      {" · do konce "}
-      <span
-        className={`font-[family-name:var(--font-mono)] ${soon ? "text-[var(--accent-soft)]" : "text-[var(--ink)]"}`}
+    <div className="shrink-0 text-left sm:text-right">
+      <p className="label no-mark">Do konce</p>
+      <p
+        className={`text-4xl font-bold tabular-nums tracking-tight ${soon ? "text-[var(--accent-soft)]" : "text-[var(--ink)]"}`}
       >
         {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}
-      </span>
-    </>
+      </p>
+    </div>
   );
 }
 
 export function StudioClient({ station }: { station: StationConfig }) {
   const {
-    playing,
     nowPlaying,
     trackStartedAt,
     broadcasting,
     stationOnline,
     listeners,
     segment,
-    toggle,
     moderationPending,
   } = useRadio();
   const router = useRouter();
+  const monitor = useStudioMonitor();
+  const [unreadMessages, setUnreadMessages] = useState(0);
+  const monitorAhead = monitor.state === "live" ? (monitor.listenerDelaySec ?? 0) : 0;
 
-  const [tab, setTab] = useState<Tab>("library");
+  const [tab, setTab] = useState<Tab>("live");
   const [queue, setQueue] = useState<StudioQueueItem[]>([]);
   const [library, setLibrary] = useState<LibraryTrack[]>([]);
   const [stats, setStats] = useState<LibraryStats | null>(null);
@@ -399,13 +419,68 @@ export function StudioClient({ station }: { station: StationConfig }) {
 
   const onAir = broadcasting && stationOnline;
 
+  const queueList = !queue.length ? (
+    <p className="text-sm text-[var(--ink-muted)]">Fronta je prázdná nebo broadcaster neběží.</p>
+  ) : (
+    <ol onDragLeave={() => setDropIndex(null)}>
+      {fixed.map((item) => (
+        <QueueRow
+          key={`${item.source}-${item.uuid}`}
+          item={item}
+          badge={item.source === "prepared" ? "další" : "přání"}
+          onRemove={() => void removeFromQueue(item)}
+          onNow={() => void playNow(item.uuid, item.title)}
+        />
+      ))}
+      {rotation.map((item, index) => (
+        <QueueRow
+          key={item.uuid}
+          item={item}
+          draggable
+          dragging={dragUuid === item.uuid}
+          dropBefore={dropIndex === index}
+          dropAfter={dropIndex === rotation.length && index === rotation.length - 1}
+          onDragStart={(e) => onDragStart(e, item.uuid)}
+          onDragOver={(e) => onDragOver(e, index)}
+          onDrop={onDrop}
+          onDragEnd={() => {
+            setDragUuid(null);
+            setDropIndex(null);
+          }}
+          onUp={index > 0 ? () => void moveRotation(item.uuid, index - 1) : undefined}
+          onDown={index < rotation.length - 1 ? () => void moveRotation(item.uuid, index + 1) : undefined}
+          onNext={() => void playNext(item.uuid, item.title)}
+          onRemove={() => void removeFromQueue(item)}
+        />
+      ))}
+    </ol>
+  );
+
+  const segmentLabel =
+    segment === "stinger"
+      ? "jingle"
+      : segment === "talk"
+        ? "pauza na slovo"
+        : segment === "crossfade"
+          ? "přechod"
+          : null;
+
+  const noticeLine = notice ? (
+    <p
+      className={`mt-3 text-sm ${notice.ok ? "text-[var(--ink-muted)]" : "text-[var(--danger)]"}`}
+      role="status"
+    >
+      {notice.text}
+    </p>
+  ) : null;
+
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="border-b border-[var(--line)]">
-        <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between gap-4 px-4 sm:px-8">
+      <header className="sticky top-0 z-20 border-b border-[var(--line)] bg-[var(--bg-deep)]/95 backdrop-blur">
+        <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
           <div className="flex min-w-0 items-center gap-4">
             <StationHeader config={{ ...station, tagline: "" }} compact />
-            <span className="label hidden border-l border-[var(--line-strong)] pl-4 sm:inline">
+            <span className="label no-mark hidden border-l border-[var(--line-strong)] pl-4 sm:inline">
               Studio
             </span>
           </div>
@@ -417,210 +492,321 @@ export function StudioClient({ station }: { station: StationConfig }) {
             <TextButton onClick={() => void logout()}>Odhlásit</TextButton>
           </div>
         </div>
+        <nav className="mx-auto flex w-full max-w-7xl gap-1 overflow-x-auto px-4 pb-3 sm:px-6" aria-label="Sekce studia">
+          {TABS.map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setTab(key)}
+              className={`inline-flex shrink-0 items-center gap-2 rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
+                tab === key
+                  ? "bg-[var(--accent)] text-[var(--ink)]"
+                  : "text-[var(--ink-muted)] hover:bg-[var(--ink)]/10 hover:text-[var(--ink)]"
+              }`}
+            >
+              {label}
+              {key === "live" && moderationPending > 0 && tab !== "live" ? (
+                <span className="rounded-full bg-[var(--ink)] px-1.5 text-[11px] text-[var(--bg-deep)]">
+                  {moderationPending}
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </nav>
       </header>
 
-      <main className="mx-auto grid w-full max-w-7xl flex-1 gap-12 px-4 py-8 sm:px-8 lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)] lg:gap-16">
-        {/* ───────── vysílání + fronta ───────── */}
-        <div className="min-w-0 space-y-10">
-          <section>
-            <SectionTitle
-              aside={
-                segment !== "song" ? (
-                  <span className="text-xs text-[var(--accent)]">
-                    {segment === "stinger" ? "jingle" : segment === "talk" ? "pauza" : "přechod"}
+      <main
+        className={`mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 ${tab === "live" ? "pb-28 lg:pb-6" : ""}`}
+      >
+        {tab === "live" ? (
+          <div className="space-y-6">
+            {/* ───────── co právě jde do éteru ───────── */}
+            <Card>
+              <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
+                <div className="w-24 shrink-0 sm:w-28">
+                  <Cover src={nowPlaying?.thumbnail} size="lg" className="rounded-xl" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <LevelMeter active={onAir} />
+                    <span className="label no-mark">Ve vysílání</span>
+                    {segmentLabel ? (
+                      <span className="rounded-full bg-[var(--accent)]/15 px-2 py-0.5 text-[11px] font-semibold text-[var(--accent-soft)]">
+                        {segmentLabel}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 truncate text-2xl font-bold tracking-tight sm:text-3xl">
+                    {nowPlaying?.title ?? (onAir ? "Ladím…" : "Nevysílá se")}
+                  </p>
+                  <p className="truncate text-sm text-[var(--ink-muted)]">
+                    {nowPlaying?.artist ?? "Spusť broadcaster (start.bat)"}
+                  </p>
+                </div>
+                {nowPlaying && segment !== "talk" ? (
+                  <TimeLeft
+                    trackStartedAt={trackStartedAt}
+                    durationSec={nowPlaying.durationSec ?? null}
+                    aheadSec={monitorAhead}
+                  />
+                ) : null}
+              </div>
+              <div className="mt-5">
+                <TrackTimeline
+                  trackId={nowPlaying?.uuid ?? null}
+                  trackStartedAt={trackStartedAt}
+                  durationSec={nowPlaying?.durationSec ?? null}
+                  active={Boolean(nowPlaying && broadcasting)}
+                />
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-3">
+                <OutlineButton primary onClick={() => void skip()} disabled={!onAir}>
+                  Další skladba
+                </OutlineButton>
+                <OutlineButton onClick={monitor.toggle} disabled={monitor.state === "connecting"}>
+                  <span className="inline-flex items-center gap-2">
+                    <LevelMeter active={monitor.state === "live"} />
+                    {monitor.state === "connecting"
+                      ? "Připojuji…"
+                      : monitor.state === "live"
+                        ? "Vypnout odposlech"
+                        : "Odposlech živě"}
                   </span>
-                ) : null
-              }
-            >
-              Ve vysílání
-            </SectionTitle>
-            <div className="flex gap-4">
-              <Cover src={nowPlaying?.thumbnail} size="md" className="rounded-[3px]" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate font-[family-name:var(--font-display)] text-2xl font-semibold leading-tight">
-                  {nowPlaying?.title ?? (onAir ? "Ladím…" : "Nevysílá se")}
+                </OutlineButton>
+                {monitor.state === "live" ? (
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={monitor.volume}
+                    onChange={(e) => monitor.setVolume(Number(e.target.value))}
+                    className="broadcast-range w-24"
+                    style={{ "--fill": `${Math.round(monitor.volume * 100)}%` } as CSSProperties}
+                    aria-label="Hlasitost odposlechu"
+                  />
+                ) : null}
+                {nextItem ? (
+                  <p className="min-w-0 truncate text-sm text-[var(--ink-muted)]">
+                    Potom:{" "}
+                    <span className="text-[var(--ink)]">
+                      {nextItem.artist} — {nextItem.title}
+                    </span>
+                  </p>
+                ) : null}
+              </div>
+              {monitor.state === "live" ? (
+                <p className="mt-3 text-xs text-[var(--ink-muted)]">
+                  Slyšíš vysílání bez zpoždění (bez svého mikrofonu). Posluchači to slyší asi o{" "}
+                  {Math.round(monitor.listenerDelaySec ?? 3)} s později — odpočet ukazuje tvůj čas.
                 </p>
-                <p className="truncate text-sm text-[var(--ink-muted)]">
-                  {nowPlaying?.artist ?? "Spusť broadcaster (start.bat)"}
-                  {nowPlaying && segment !== "talk" ? (
-                    <TimeLeft
-                      trackStartedAt={trackStartedAt}
-                      durationSec={nowPlaying.durationSec ?? null}
-                    />
-                  ) : null}
-                </p>
+              ) : monitor.error ? (
+                <p className="mt-3 text-sm text-[var(--danger)]">{monitor.error}</p>
+              ) : null}
+              {noticeLine}
+              {nowPlaying?.dedication ? (
+                <>
+                  <DedicationNote dedication={nowPlaying.dedication} large title="Přečti do éteru" />
+                  {nowPlaying.dedication.voiceId ? <VoiceNoteControls id={nowPlaying.dedication.voiceId} /> : null}
+                </>
+              ) : null}
+            </Card>
+
+            {/* Na telefonu jeden sloupec seřazený podle důležitosti (order), na PC tři sloupce. */}
+            <div className="grid gap-6 lg:grid-cols-3">
+              <div className="contents lg:block lg:min-w-0 lg:space-y-6">
+                <Card id="studio-mic" className="order-2 lg:order-none">
+                  <MicPanel />
+                </Card>
+                <Card className="order-9 lg:order-none">
+                  <AiDjPanel />
+                </Card>
+                <Card className="order-4 lg:order-none">
+                  <BreakPanel
+                    library={library}
+                    nextTitle={nextItem ? `${nextItem.artist} — ${nextItem.title}` : null}
+                  />
+                </Card>
+                <Card className="order-7 lg:order-none">
+                  <SchedulePanel library={library} />
+                </Card>
+              </div>
+              <div className="contents lg:block lg:min-w-0 lg:space-y-6">
+                <Card id="studio-requests" className="order-1 lg:order-none">
+                  <RequestModeration />
+                </Card>
+                <Card className="order-6 lg:order-none">
+                  <SuggestionsPanel />
+                </Card>
+              </div>
+              <div className="contents lg:block lg:min-w-0 lg:space-y-6">
+                <Card id="studio-messages" className="order-3 lg:order-none">
+                  <MessagesPanel onUnread={setUnreadMessages} />
+                </Card>
+                <Card className="order-5 lg:order-none">
+                  <SectionTitle aside={<span className="text-xs text-[var(--ink-faint)]">přetáhni pro pořadí</span>}>
+                    Fronta
+                  </SectionTitle>
+                  {queueList}
+                </Card>
+                <Card className="order-8 lg:order-none">
+                  <TickerPanel />
+                </Card>
               </div>
             </div>
-            <div className="mt-4">
-              <TrackTimeline
-                trackId={nowPlaying?.uuid ?? null}
-                trackStartedAt={trackStartedAt}
-                durationSec={nowPlaying?.durationSec ?? null}
-                active={Boolean(nowPlaying && broadcasting)}
-              />
-            </div>
-            {nowPlaying?.dedication ? (
-              <>
-                <DedicationNote dedication={nowPlaying.dedication} large title="Přečti do éteru" />
-                {nowPlaying.dedication.voiceId ? (
-                  <VoiceNoteControls id={nowPlaying.dedication.voiceId} />
-                ) : null}
-              </>
-            ) : null}
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              <OutlineButton primary onClick={() => void skip()} disabled={!onAir}>
-                Další skladba
-              </OutlineButton>
-              <OutlineButton onClick={toggle}>
-                <span className="inline-flex items-center gap-2">
-                  <LevelMeter active={playing} />
-                  {playing ? "Přestat poslouchat" : "Odposlech"}
-                </span>
-              </OutlineButton>
-            </div>
-            <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
-              <TextButton disabled={busy || !nowPlaying || !nextItem} onClick={() => void previewTransition()}>
-                Náhled přechodu
-              </TextButton>
-              <TextButton disabled={busy || !onAir} onClick={() => void runTest("transition")}>
-                Test přechodu naživo
-              </TextButton>
-              <TextButton
-                disabled={busy || !onAir || !health?.midsong.configured}
-                onClick={() => void runTest("jingle")}
-              >
-                Test jinglu naživo
-              </TextButton>
-            </div>
-            {notice ? (
-              <p
-                className={`mt-3 text-sm ${notice.ok ? "text-[var(--ink-muted)]" : "text-[var(--danger)]"}`}
-                role="status"
-              >
-                {notice.text}
-              </p>
-            ) : null}
-            <audio ref={previewRef} className="hidden" preload="none" />
-          </section>
 
-          <BreakPanel
-            library={library}
-            nextTitle={nextItem ? `${nextItem.artist} — ${nextItem.title}` : null}
-          />
-
-          <MicPanel />
-
-          <RequestModeration />
-
-          <section>
-            <SectionTitle
-              aside={<span className="text-xs text-[var(--ink-faint)]">přetáhni pro změnu pořadí</span>}
+            {/* Telefon: rychlé ovládání palcem — mikrofon, další skladba, přání, vzkazy. */}
+            <nav
+              className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--line)] bg-[var(--bg-deep)]/95 px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur lg:hidden"
+              aria-label="Rychlé ovládání"
             >
-              Fronta
-            </SectionTitle>
-            {!queue.length ? (
-              <p className="text-sm text-[var(--ink-muted)]">Fronta je prázdná nebo broadcaster neběží.</p>
-            ) : (
-              <ol onDragLeave={() => setDropIndex(null)}>
-                {fixed.map((item) => (
-                  <QueueRow
-                    key={`${item.source}-${item.uuid}`}
-                    item={item}
-                    badge={item.source === "prepared" ? "další" : "přání"}
-                    onRemove={() => void removeFromQueue(item)}
-                    onNow={() => void playNow(item.uuid, item.title)}
-                  />
-                ))}
-                {rotation.map((item, index) => (
-                  <QueueRow
-                    key={item.uuid}
-                    item={item}
-                    draggable
-                    dragging={dragUuid === item.uuid}
-                    dropBefore={dropIndex === index}
-                    dropAfter={dropIndex === rotation.length && index === rotation.length - 1}
-                    onDragStart={(e) => onDragStart(e, item.uuid)}
-                    onDragOver={(e) => onDragOver(e, index)}
-                    onDrop={onDrop}
-                    onDragEnd={() => {
-                      setDragUuid(null);
-                      setDropIndex(null);
-                    }}
-                    onUp={index > 0 ? () => void moveRotation(item.uuid, index - 1) : undefined}
-                    onDown={
-                      index < rotation.length - 1
-                        ? () => void moveRotation(item.uuid, index + 1)
-                        : undefined
-                    }
-                    onNext={() => void playNext(item.uuid, item.title)}
-                    onRemove={() => void removeFromQueue(item)}
-                  />
-                ))}
-              </ol>
-            )}
-          </section>
-        </div>
-
-        {/* ───────── záložky ───────── */}
-        <div className="min-w-0">
-          <nav className="mb-8 flex gap-6 border-b border-[var(--line)]" aria-label="Sekce studia">
-            {TABS.map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setTab(key)}
-                className={`-mb-px border-b-2 pb-3 font-[family-name:var(--font-display)] text-sm font-semibold uppercase tracking-wider transition-colors ${
-                  tab === key
-                    ? "border-[var(--accent)] text-[var(--ink)]"
-                    : "border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </nav>
-
-          {tab === "library" ? (
-            <LibraryTab
-              library={library}
-              statsByUuid={statsByUuid}
-              nowPlayingUuid={nowPlaying?.uuid ?? null}
-              onNext={(t) => void playNext(t.uuid, t.title)}
-              onNow={(t) => void playNow(t.uuid, t.title)}
-              onDeleted={() => {
-                void loadLibrary();
-                void loadQueue();
-                void loadStats();
-              }}
-              say={say}
-              stats={stats}
-              moderationPending={moderationPending}
-              onAdd={() => setTab("import")}
-            />
-          ) : tab === "stats" ? (
-            <StatsTab
-              stats={stats}
-              onNext={(r) => void playNext(r.uuid, r.title)}
-              onDeleted={() => {
-                void loadLibrary();
-                void loadQueue();
-                void loadStats();
-              }}
-            />
-          ) : tab === "import" ? (
-            <ImportTab onDone={() => {
+              <div className="mx-auto grid max-w-md grid-cols-4 gap-2">
+                <MobileAction label="Mikrofon" onClick={() => scrollToCard("studio-mic")}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <rect x="9" y="3" width="6" height="11" rx="3" />
+                    <path d="M5 11a7 7 0 0014 0M12 18v3" />
+                  </svg>
+                </MobileAction>
+                <MobileAction label="Další" onClick={() => void skip()} primary disabled={!onAir}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                    <path d="M5 5.5v13l9-6.5-9-6.5zM16 5h3v14h-3z" />
+                  </svg>
+                </MobileAction>
+                <MobileAction label="Přání" badge={moderationPending} onClick={() => scrollToCard("studio-requests")}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M9 18V5l12-2v13" />
+                    <circle cx="6" cy="18" r="3" />
+                    <circle cx="18" cy="16" r="3" />
+                  </svg>
+                </MobileAction>
+                <MobileAction label="Vzkazy" badge={unreadMessages} onClick={() => scrollToCard("studio-messages")}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                  </svg>
+                </MobileAction>
+              </div>
+            </nav>
+          </div>
+        ) : tab === "library" ? (
+          <LibraryTab
+            library={library}
+            statsByUuid={statsByUuid}
+            nowPlayingUuid={nowPlaying?.uuid ?? null}
+            onNext={(t) => void playNext(t.uuid, t.title)}
+            onNow={(t) => void playNow(t.uuid, t.title)}
+            onDeleted={() => {
+              void loadLibrary();
+              void loadQueue();
+              void loadStats();
+            }}
+            say={say}
+            stats={stats}
+            moderationPending={moderationPending}
+            onAdd={() => setTab("import")}
+          />
+        ) : tab === "stats" ? (
+          <StatsTab
+            stats={stats}
+            onNext={(r) => void playNext(r.uuid, r.title)}
+            onDeleted={() => {
+              void loadLibrary();
+              void loadQueue();
+              void loadStats();
+            }}
+          />
+        ) : tab === "import" ? (
+          <ImportTab
+            onDone={() => {
               void loadLibrary();
               void loadStats();
-            }} />
-          ) : (
-            <SystemTab health={health} onRemasterDone={() => {
-              void loadLibrary();
-              void loadHealth();
-            }} />
-          )}
-        </div>
+            }}
+          />
+        ) : (
+          <div className="space-y-12">
+            <section>
+              <SectionTitle>Testy přechodů</SectionTitle>
+              <p className="mb-4 max-w-lg text-sm text-[var(--ink-muted)]">
+                Náhled přechodu hraje jen do tvých sluchátek. Testy naživo skočí na konec skladby ve vysílání.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <OutlineButton disabled={busy || !nowPlaying || !nextItem} onClick={() => void previewTransition()}>
+                  Náhled přechodu
+                </OutlineButton>
+                <OutlineButton disabled={busy || !onAir} onClick={() => void runTest("transition")}>
+                  Test přechodu naživo
+                </OutlineButton>
+                <OutlineButton
+                  disabled={busy || !onAir || !health?.midsong.configured}
+                  onClick={() => void runTest("jingle")}
+                >
+                  Test jinglu naživo
+                </OutlineButton>
+              </div>
+              {noticeLine}
+            </section>
+            <SystemTab
+              health={health}
+              onRemasterDone={() => {
+                void loadLibrary();
+                void loadHealth();
+              }}
+            />
+          </div>
+        )}
+        <audio ref={previewRef} className="hidden" preload="none" />
       </main>
     </div>
+  );
+}
+
+function Card({ children, id, className = "" }: { children: ReactNode; id?: string; className?: string }) {
+  return (
+    <div
+      id={id}
+      className={`min-w-0 scroll-mt-32 rounded-2xl border border-[var(--line)] bg-[var(--bg-mid)] p-5 sm:p-6 ${className}`}
+    >
+      {children}
+    </div>
+  );
+}
+
+function scrollToCard(id: string): void {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function MobileAction({
+  label,
+  children,
+  onClick,
+  badge = 0,
+  primary = false,
+  disabled = false,
+}: {
+  label: string;
+  children: ReactNode;
+  onClick: () => void;
+  badge?: number;
+  primary?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      {...NO_STATE_RESTORE}
+      className={`relative flex h-14 flex-col items-center justify-center gap-0.5 rounded-xl text-[11px] font-semibold transition-colors disabled:opacity-40 ${
+        primary ? "bg-[var(--accent)] text-[var(--ink)]" : "bg-[var(--bg-mid)] text-[var(--ink)]"
+      }`}
+    >
+      {children}
+      {label}
+      {badge > 0 ? (
+        <span className="absolute right-2 top-1.5 min-w-[18px] rounded-full bg-[var(--accent)] px-1 text-[10px] leading-[18px] text-[var(--ink)]">
+          {badge}
+        </span>
+      ) : null}
+    </button>
   );
 }
 
@@ -950,6 +1136,11 @@ function StatsTab({
 
   return (
     <div className="space-y-12">
+      <section>
+        <SectionTitle>Posluchači podle hodiny</SectionTitle>
+        <ListenerChart />
+      </section>
+
       <div className="grid grid-cols-2 gap-8 sm:grid-cols-4">
         <Figure value={String(rows.length)} label="skladeb v knihovně" />
         <Figure value={stats.libraryHours.toFixed(1).replace(".", ",")} label="hodin hudby" />
@@ -1054,55 +1245,82 @@ function importItemLabel(item: ImportJob["items"][number]): string {
 
 function ImportTab({ onDone }: { onDone: () => void }) {
   const [url, setUrl] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [job, setJob] = useState<ImportJob | null>(null);
+  // Odkazy, které se právě načítají ze Spotify — dá se mezitím vložit další.
+  const [submitting, setSubmitting] = useState<{ key: number; url: string }[]>([]);
+  const [errors, setErrors] = useState<{ key: number; url: string; text: string }[]>([]);
+  // Importy ze serveru (i z dřívějška) — po přepnutí záložky nezmizí.
+  const [jobs, setJobs] = useState<ImportJob[]>([]);
+  const keyRef = useRef(0);
+  const activeIdsRef = useRef<Set<string>>(new Set());
+
+  const isActive = (j: ImportJob) => j.status === "running" || j.status === "queued";
+  const anyActive = jobs.some(isActive) || submitting.length > 0;
+
+  const loadJobs = useCallback(async () => {
+    try {
+      const res = await fetch("/api/jobs", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as { jobs?: ImportJob[] };
+      const list = [...(data.jobs ?? [])].reverse(); // nejstarší nahoře = pořadí stahování
+      const nowActive = new Set(list.filter(isActive).map((j) => j.id));
+      const finished = [...activeIdsRef.current].some((id) => !nowActive.has(id));
+      activeIdsRef.current = nowActive;
+      setJobs(list);
+      if (finished) onDone();
+    } catch {
+      // offline
+    }
+  }, [onDone]);
 
   useEffect(() => {
-    if (!job || job.status === "done" || job.status === "failed") return;
-    const timer = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/jobs/${job.id}`);
-        const data = (await res.json()) as { job?: ImportJob };
-        if (!data.job) return;
-        setJob(data.job);
-        if (data.job.status === "done" || data.job.status === "failed") onDone();
-      } catch {
-        // ignore
-      }
-    }, 1000);
+    const first = setTimeout(() => void loadJobs(), 0);
+    return () => clearTimeout(first);
+  }, [loadJobs]);
+
+  useEffect(() => {
+    if (!anyActive) return;
+    const timer = setInterval(() => void loadJobs(), 1500);
     return () => clearInterval(timer);
-  }, [job, onDone]);
+  }, [anyActive, loadJobs]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    setError(null);
-    setLoading(true);
+    const link = url.trim();
+    if (!link) return;
+    const key = ++keyRef.current;
+    setUrl("");
+    setSubmitting((s) => [...s, { key, url: link }]);
     try {
       const res = await fetch("/api/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url: link }),
       });
-      const data = (await res.json()) as { job?: ImportJob; error?: string };
+      const data = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(data.error || "Import selhal.");
-      if (data.job) setJob(data.job);
-      setUrl("");
+      await loadJobs();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Import selhal.");
+      setErrors((list) => [
+        ...list,
+        { key, url: link, text: err instanceof Error ? err.message : "Import selhal." },
+      ]);
     } finally {
-      setLoading(false);
+      setSubmitting((s) => s.filter((x) => x.key !== key));
     }
   }
 
-  const running = job?.status === "running" || job?.status === "queued";
-  const pct = job?.total ? Math.round((job.completed / job.total) * 100) : 0;
+  const active = jobs.filter(isActive);
+  const totals = active.reduce(
+    (acc, j) => ({ done: acc.done + j.completed, all: acc.all + j.total }),
+    { done: 0, all: 0 },
+  );
+  const focus = jobs.find((j) => j.status === "running") ?? active[0] ?? jobs.at(-1) ?? null;
 
   return (
     <section>
       <p className="mb-6 max-w-lg text-sm text-[var(--ink-muted)]">
-        Vlož odkaz na skladbu, album nebo playlist ze Spotify (max 50 skladeb).
-        Audio se stáhne, zmasteruje a skladby se samy zařadí do rotace.
+        Vkládej odkazy na skladby, alba nebo playlisty ze Spotify klidně jeden po druhém — řadí se
+        do fronty a stahují postupně. Delší playlist (až 500 skladeb) se sám rozdělí na části po 50.
       </p>
       <form onSubmit={submit} className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <input
@@ -1110,58 +1328,125 @@ function ImportTab({ onDone }: { onDone: () => void }) {
           required
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          disabled={loading || running}
           placeholder="https://open.spotify.com/playlist/…"
           className="min-w-0 flex-1 border-b border-[var(--line-strong)] bg-transparent py-2 text-sm outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
         />
-        <OutlineButton type="submit" primary disabled={loading || running || !url.trim()}>
-          {loading ? "Odesílám…" : "Stáhnout"}
+        <OutlineButton type="submit" primary disabled={!url.trim()}>
+          {anyActive ? "Přidat do fronty" : "Stáhnout"}
         </OutlineButton>
       </form>
-      {error ? <p className="mt-3 text-sm text-[var(--danger)]" role="alert">{error}</p> : null}
 
-      {job ? (
+      {submitting.length ? (
+        <ul className="mt-3 space-y-1">
+          {submitting.map((s) => (
+            <li key={s.key} className="truncate text-xs text-[var(--ink-muted)]">
+              Načítám ze Spotify… <span className="text-[var(--ink-faint)]">{s.url}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {errors.length ? (
+        <ul className="mt-3 space-y-1" role="alert">
+          {errors.map((er) => (
+            <li key={er.key} className="flex items-start justify-between gap-3 text-sm text-[var(--danger)]">
+              <span className="min-w-0">
+                {er.text} <span className="block truncate text-xs text-[var(--ink-faint)]">{er.url}</span>
+              </span>
+              <TextButton onClick={() => setErrors((list) => list.filter((x) => x.key !== er.key))}>
+                Zavřít
+              </TextButton>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {jobs.length ? (
         <div className="mt-10">
           <div className="flex items-baseline justify-between gap-3">
-            <p className="truncate font-medium">{job.title}</p>
-            <span className="shrink-0 font-[family-name:var(--font-mono)] text-xs text-[var(--ink-muted)]">
-              {job.completed}/{job.total}
-            </span>
+            <p className="label">Fronta stahování</p>
+            {active.length ? (
+              <span className="shrink-0 font-[family-name:var(--font-mono)] text-xs text-[var(--ink-muted)]">
+                zbývá {totals.all - totals.done} skladeb
+              </span>
+            ) : null}
           </div>
-          <div className="mt-2 h-[3px] bg-[var(--line-strong)]">
-            <div className="h-full bg-[var(--accent)] transition-[width]" style={{ width: `${pct}%` }} />
-          </div>
-          {running && (job.current || job.currentDetail) ? (
-            <p className="mt-3 text-sm text-[var(--ink-muted)]">
-              {job.current}
-              {job.currentDetail ? ` — ${job.currentDetail}` : ""}
-            </p>
-          ) : null}
-          {job.items.length ? (
-            <ul className="mt-4 max-h-80 overflow-y-auto">
-              {job.items.map((item, i) => (
-                <li
-                  key={`${item.title}-${i}`}
-                  className="flex justify-between gap-4 border-t border-[var(--line)] py-1.5 text-xs first:border-t-0"
-                >
-                  <span className="truncate">
-                    {item.title} <span className="text-[var(--ink-muted)]">— {item.artist}</span>
-                  </span>
-                  <span
-                    className={`shrink-0 ${
-                      item.status === "failed" ? "text-[var(--danger)]" : "text-[var(--ink-muted)]"
-                    }`}
-                    title={item.error ?? undefined}
-                  >
-                    {importItemLabel(item)}
-                  </span>
+          <ul className="mt-2">
+            {jobs.map((j) => {
+              const pct = j.total ? Math.round((j.completed / j.total) * 100) : 0;
+              return (
+                <li key={j.id} className="border-t border-[var(--line)] py-2 first:border-t-0">
+                  <div className="flex items-baseline justify-between gap-3 text-sm">
+                    <span className={`truncate ${j.id === focus?.id ? "text-[var(--ink)]" : "text-[var(--ink-muted)]"}`}>
+                      {j.title}
+                    </span>
+                    <span className="shrink-0 text-xs text-[var(--ink-muted)]">
+                      {j.status === "queued"
+                        ? "čeká"
+                        : j.status === "running"
+                          ? `${j.completed}/${j.total}`
+                          : j.status === "failed"
+                            ? j.error?.startsWith("Přerušeno") ? "přerušeno" : "selhalo"
+                            : `hotovo ${j.completed - j.failed}/${j.total}`}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-[3px] bg-[var(--line-strong)]">
+                    <div className="h-full bg-[var(--accent)] transition-[width]" style={{ width: `${pct}%` }} />
+                  </div>
                 </li>
-              ))}
-            </ul>
-          ) : null}
+              );
+            })}
+          </ul>
         </div>
       ) : null}
+
+      {focus ? <ImportJobDetail job={focus} /> : null}
     </section>
+  );
+}
+
+function ImportJobDetail({ job }: { job: ImportJob }) {
+  const running = job.status === "running" || job.status === "queued";
+  const pct = job.total ? Math.round((job.completed / job.total) * 100) : 0;
+  return (
+    <div className="mt-10">
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="truncate font-medium">{job.title}</p>
+        <span className="shrink-0 font-[family-name:var(--font-mono)] text-xs text-[var(--ink-muted)]">
+          {job.completed}/{job.total}
+        </span>
+      </div>
+      <div className="mt-2 h-[3px] bg-[var(--line-strong)]">
+        <div className="h-full bg-[var(--accent)] transition-[width]" style={{ width: `${pct}%` }} />
+      </div>
+      {running && (job.current || job.currentDetail) ? (
+        <p className="mt-3 text-sm text-[var(--ink-muted)]">
+          {job.current}
+          {job.currentDetail ? ` — ${job.currentDetail}` : ""}
+        </p>
+      ) : null}
+      {job.items.length ? (
+        <ul className="mt-4 max-h-80 overflow-y-auto">
+          {job.items.map((item, i) => (
+            <li
+              key={`${item.title}-${i}`}
+              className="flex justify-between gap-4 border-t border-[var(--line)] py-1.5 text-xs first:border-t-0"
+            >
+              <span className="truncate">
+                {item.title} <span className="text-[var(--ink-muted)]">— {item.artist}</span>
+              </span>
+              <span
+                className={`shrink-0 ${
+                  item.status === "failed" ? "text-[var(--danger)]" : "text-[var(--ink-muted)]"
+                }`}
+                title={item.error ?? undefined}
+              >
+                {importItemLabel(item)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 

@@ -40,6 +40,8 @@ export async function GET(request: Request) {
         moderationPending: 0,
         breakState: "none",
         moderator: null,
+        moderatorOnAir: false,
+        tickerMessages: [],
         bed: "builtin",
         bedLevelDb: -10,
         streamUrl: getPublicStreamUrl(origin),

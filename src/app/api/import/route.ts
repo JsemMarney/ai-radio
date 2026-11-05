@@ -5,6 +5,7 @@ import {
   fetchSpotifyAlbum,
   fetchSpotifyPlaylist,
   fetchSpotifyTrackMeta,
+  IMPORT_CHUNK_SIZE,
   parseSpotifyUrl,
   PLAYLIST_IMPORT_LIMIT,
 } from "@/lib/spotify";
@@ -72,24 +73,35 @@ export async function POST(request: Request) {
       );
     }
 
-    const job = await createPlaylistJob({
-      title: collection.name,
-      tracks: collection.tracks,
-      source: parsed.kind === "album" ? "album" : "playlist",
-    });
-    startPlaylistJob(job.id, collection.tracks);
+    // Dlouhý playlist → víc menších importů po IMPORT_CHUNK_SIZE, stahují se za sebou.
+    const parts: (typeof collection.tracks)[] = [];
+    for (let i = 0; i < collection.tracks.length; i += IMPORT_CHUNK_SIZE) {
+      parts.push(collection.tracks.slice(i, i + IMPORT_CHUNK_SIZE));
+    }
+    const jobs = [];
+    for (const [index, tracks] of parts.entries()) {
+      const job = await createPlaylistJob({
+        title: parts.length > 1 ? `${collection.name} · část ${index + 1}/${parts.length}` : collection.name,
+        tracks,
+        source: parsed.kind === "album" ? "album" : "playlist",
+      });
+      startPlaylistJob(job.id, tracks);
+      jobs.push(job);
+    }
 
     return NextResponse.json({
       type: parsed.kind === "album" ? "album" : "playlist",
-      jobId: job.id,
+      jobId: jobs[0].id,
       playlist: {
         id: collection.id,
         name: collection.name,
         truncated: collection.truncated,
         limit: PLAYLIST_IMPORT_LIMIT,
         total: collection.tracks.length,
+        parts: parts.length,
       },
-      job,
+      job: jobs[0],
+      jobs,
     });
   } catch (error) {
     const message =

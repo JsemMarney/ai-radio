@@ -126,3 +126,42 @@ export function checkSongRequestLimit(ip: string): { allowed: boolean; retryAfte
 export function recordSongRequest(ip: string): void {
   requestLimiter.hit(ip);
 }
+
+// ───────── návrhy písniček do knihovny ─────────
+
+const suggestLimiter = new RateLimiter(
+  Number(process.env.RADIO_SUGGESTIONS_PER_IP ?? 5) || 5,
+  60 * 60 * 1000,
+);
+const searchLimiter = new RateLimiter(40, 60 * 1000);
+
+export function checkSuggestLimit(ip: string): { allowed: boolean; retryAfterSec: number } {
+  return suggestLimiter.check(ip);
+}
+
+export function recordSuggest(ip: string): void {
+  suggestLimiter.hit(ip);
+}
+
+/** Hledání na Spotify — ochrana API klíče před spamem. */
+export function hitSearchLimit(ip: string): boolean {
+  const r = searchLimiter.check(ip);
+  if (!r.allowed) return false;
+  searchLimiter.hit(ip);
+  return true;
+}
+
+// ───────── vzkazy moderátorovi ─────────
+
+const messageLimiter = new RateLimiter(
+  Number(process.env.RADIO_MESSAGES_PER_IP ?? 3) || 3,
+  10 * 60 * 1000,
+);
+
+export function checkMessageLimit(ip: string): { allowed: boolean; retryAfterSec: number } {
+  return messageLimiter.check(ip);
+}
+
+export function recordMessage(ip: string): void {
+  messageLimiter.hit(ip);
+}

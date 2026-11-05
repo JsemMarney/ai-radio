@@ -37,7 +37,12 @@ function getSongSeparationRatio(): number {
 export type CatalogEntry = RadioNowPlaying & {
   artistKey: string;
   albumKey: string;
+  /** Hlasitost/energie (LUFS) z analýzy mixu — pro plynulý tok. */
+  lufs: number | null;
 };
+
+/** Statistiky skladby, ze kterých se AutoDJ učí. */
+export type RotationStats = Record<string, { plays: number; skips?: number; requests?: number }>;
 
 let cachedCatalog: { entries: Map<string, CatalogEntry>; at: number } | null =
   null;
@@ -83,6 +88,7 @@ export async function getCatalog(): Promise<Map<string, CatalogEntry>> {
       durationSec: t.playDuration ?? t.duration ?? null,
       artistKey: normalizeArtist(t.artist) || t.uuid,
       albumKey: (t.album ?? "").toLowerCase().trim(),
+      lufs: t.mixAnalysis?.lufs ?? null,
     });
   }
   cachedCatalog = { entries, at: now };
@@ -96,12 +102,17 @@ export async function getCatalog(): Promise<Map<string, CatalogEntry>> {
  * Pravidla (jako u rádiové automatizace):
  *  1. skladba se neopakuje, dokud nezazní ~60 % knihovny,
  *  2. stejný interpret ne dřív než po N jiných,
- *  3. ze zbylých kandidátů vážený los — čím déle nehrála, tím větší šance.
+ *  3. ze zbylých kandidátů vážený los — čím déle nehrála a čím méně hrála celkem, tím větší šance
+ *     (nové skladby se tak rychle dostanou do vysílání a nic se neohraje víc než zbytek),
+ *  4. učí se: často přeskakované skladby dostávají méně šancí, často přané víc,
+ *  5. plynulý tok — velký skok v energii (hlasitosti) po sobě je méně pravděpodobný.
  */
 export function pickRotationTrack(
   catalog: Map<string, CatalogEntry>,
   recent: string[],
   exclude: Set<string> = new Set(),
+  /** Kolikrát už skladba hrála — málo hrané dostanou přednost. */
+  plays: RotationStats = {},
 ): string | null {
   const ids = [...catalog.keys()].filter((id) => !exclude.has(id));
   if (!ids.length) return null;
@@ -127,30 +138,46 @@ export function pickRotationTrack(
     pool = byAge.slice(0, Math.max(1, Math.ceil(byAge.length / 4)));
   }
 
-  // 2) artist separation
+  // 2) artist separation — počítají se i hosté (feat.), ne jen hlavní interpret
   const distinctArtists = new Set(
     [...catalog.values()].map((e) => e.artistKey),
   ).size;
   const spacing = Math.min(getArtistSpacing(), Math.max(0, distinctArtists - 1));
   if (spacing > 0) {
     const blockedArtists = new Set<string>();
-    for (const id of recent) {
-      if (blockedArtists.size >= spacing) break;
-      const artist = catalog.get(id)?.artistKey;
-      if (artist) blockedArtists.add(artist);
+    for (const id of recent.slice(0, spacing)) {
+      const entry = catalog.get(id);
+      if (entry) for (const a of allArtists(entry)) blockedArtists.add(a);
     }
     const spaced = pool.filter(
-      (id) => !blockedArtists.has(catalog.get(id)!.artistKey),
+      (id) => !allArtists(catalog.get(id)!).some((a) => blockedArtists.has(a)),
     );
     if (spaced.length) pool = spaced;
   }
 
+  // Průměrný počet přehrání v knihovně — měřítko pro férovost.
+  const counts = ids.map((id) => plays[id]?.plays ?? 0);
+  const avgPlays = counts.reduce((a, b) => a + b, 0) / Math.max(1, counts.length);
+
   // 3) vážený los
-  const prevAlbum = recent.length ? catalog.get(recent[0]!)?.albumKey : "";
+  const prev = recent.length ? catalog.get(recent[0]!) : undefined;
   const weights = pool.map((id) => {
+    const entry = catalog.get(id)!;
+    const stats = plays[id];
     let w = Math.pow(Math.min(age(id), neverPlayedAge) + 1, 1.5);
-    const album = catalog.get(id)!.albumKey;
-    if (album && album === prevAlbum) w *= 0.25;
+    // Ohraná skladba (víc než průměr) ztrácí šanci, nehraná / nová ji získává.
+    const p = stats?.plays ?? 0;
+    w *= Math.pow((avgPlays + 1) / (p + 1), 2);
+    // Přeskakovaná skladba: každé přeskočení −40 % (max 4×), ať úplně nezmizí.
+    w *= Math.pow(0.6, Math.min(stats?.skips ?? 0, 4));
+    // Oblíbená přání: +35 % za každé (max 5×).
+    w *= 1 + 0.35 * Math.min(stats?.requests ?? 0, 5);
+    if (entry.albumKey && entry.albumKey === prev?.albumKey) w *= 0.25;
+    // Plynulý tok: skok o víc než 4 LU po sobě je znát (ticho → nářez).
+    if (entry.lufs != null && prev?.lufs != null) {
+      const jump = Math.abs(entry.lufs - prev.lufs);
+      if (jump > 4) w *= Math.max(0.3, 1 - (jump - 4) * 0.12);
+    }
     return w;
   });
   const sum = weights.reduce((a, b) => a + b, 0);
@@ -162,6 +189,15 @@ export function pickRotationTrack(
   return pool[pool.length - 1]!;
 }
 
+/** Všichni interpreti skladby (hlavní i hosté) normalizovaně. */
+function allArtists(entry: CatalogEntry): string[] {
+  const names = entry.artist
+    .split(/\s*(?:,|&|\/|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b|\bx\b|\bvs\.?)\s*/i)
+    .map((a) => normalizeArtist(a))
+    .filter(Boolean);
+  return [...new Set([entry.artistKey, ...names])];
+}
+
 /** Doplní frontu na cílovou délku. `context` = co hraje/hrálo, nejnovější první. */
 export function fillRotationQueue(
   queue: string[],
@@ -169,6 +205,7 @@ export function fillRotationQueue(
   context: string[],
   target = QUEUE_TARGET_SIZE,
   exclude: Set<string> = new Set(),
+  plays: RotationStats = {},
 ): string[] {
   const out = queue.filter((id) => catalog.has(id) && !exclude.has(id));
   const limit = Math.min(target, Math.max(0, catalog.size - exclude.size));
@@ -178,6 +215,7 @@ export function fillRotationQueue(
       catalog,
       recent,
       new Set([...out, ...exclude]),
+      plays,
     );
     if (!pick) break;
     out.push(pick);

@@ -55,7 +55,7 @@ export function TrackTimeline({
       </div>
       <div className="mt-2 flex justify-between font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--ink-muted)]">
         <span>{known ? formatClock(played) : "–:––"}</span>
-        <span>{known ? `−${formatClock(total - played)}` : "–:––"}</span>
+        <span>{known ? formatClock(total) : "–:––"}</span>
       </div>
     </div>
   );
@@ -66,13 +66,13 @@ export function ProgramSchedule({
   title,
 }: {
   tracks: ScheduledTrack[];
-  title: string;
+  title?: string;
 }) {
   if (!tracks.length) return null;
 
   return (
     <section>
-      <h2 className="label mb-2">{title}</h2>
+      {title ? <h2 className="label mb-2">{title}</h2> : null}
       <ul>
         {tracks.map((track, index) =>
           track.kind === "stinger" ? (

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getDownloadsDir, findDuplicateTrack } from "@/lib/library";
 import { invalidateTrackCache } from "@/lib/radio-playlist";
@@ -53,6 +53,39 @@ export async function saveJob(job: ImportJob): Promise<void> {
   memory.set(job.id, job);
   await mkdir(jobsDir(), { recursive: true });
   await writeFile(jobPath(job.id), JSON.stringify(job, null, 2), "utf8");
+}
+
+/** Importy, které běžely před startem serveru, už nikdo nedokončí. */
+const PROCESS_STARTED_AT = Date.now();
+
+/** Importy za posledních 24 h (nejnovější první) — studio je ukáže i po přepnutí záložky. */
+export async function listRecentJobs(): Promise<ImportJob[]> {
+  const dayAgo = Date.now() - 24 * 3600 * 1000;
+  let names: string[] = [];
+  try {
+    names = (await readdir(jobsDir())).filter((n) => n.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const jobs = await Promise.all(
+    names.map(async (n) => {
+      try {
+        return JSON.parse(await readFile(path.join(jobsDir(), n), "utf8")) as ImportJob;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  for (const j of jobs) {
+    if (j && (j.status === "queued" || j.status === "running") && Date.parse(j.updatedAt) < PROCESS_STARTED_AT) {
+      j.status = "failed";
+      j.error = "Přerušeno restartem — vlož odkaz znovu (hotové skladby se přeskočí).";
+    }
+  }
+  return jobs
+    .filter((j): j is ImportJob => Boolean(j) && Date.parse(j!.createdAt) > dayAgo)
+    .sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))
+    .slice(0, 30);
 }
 
 export async function getJob(id: string): Promise<ImportJob | null> {
@@ -194,9 +227,14 @@ async function runPlaylistJob(
   }
 }
 
+// Importy běží jeden po druhém — víc yt-dlp najednou jen zahltí síť a zdroje zablokují IP.
+let importChain: Promise<void> = Promise.resolve();
+
 export function startPlaylistJob(
   jobId: string,
   tracks: SpotifyTrackMeta[],
 ): void {
-  void runPlaylistJob(jobId, tracks);
+  importChain = importChain
+    .then(() => runPlaylistJob(jobId, tracks))
+    .catch((err: unknown) => console.error("[import]", err));
 }
