@@ -8,10 +8,16 @@ import {
   tryAcquireBroadcastLock,
 } from "../src/lib/radio-state";
 
+import { runSpellcheckChild } from "../src/lib/spellcheck";
+
+/** Podproces pro kontrolu slov (viz src/lib/spellcheck.ts) — žádné vysílání. */
+const SPELLCHECK_CHILD = process.argv.includes("--spellcheck");
+if (SPELLCHECK_CHILD) runSpellcheckChild();
+
 loadEnvFiles();
 installConsoleFormat();
 
-console.log("[broadcaster] Spouštím HTTP…");
+if (!SPELLCHECK_CHILD) console.log("[broadcaster] Spouštím HTTP…");
 
 let lockTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -108,7 +114,9 @@ async function main(): Promise<void> {
   process.on("SIGTERM", onSignal);
 }
 
-main().catch((error: unknown) => {
-  console.error("[broadcaster] Start selhal:", error);
-  process.exit(1);
-});
+if (!SPELLCHECK_CHILD) {
+  main().catch((error: unknown) => {
+    console.error("[broadcaster] Start selhal:", error);
+    process.exit(1);
+  });
+}

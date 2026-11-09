@@ -28,10 +28,18 @@ export function voiceNotePath(id: string): string | null {
  * Uloží hlasovku: dekóduje base64 (webm/ogg/mp4 z MediaRecorderu), převede
  * na MP3 mono se srovnanou hlasitostí a ořízne na max. délku.
  */
+function aiVoiceLufs(): number {
+  const music = Number(process.env.RADIO_TARGET_LUFS ?? -16);
+  const offset = Number(process.env.AI_DJ_VOICE_OFFSET_DB ?? 1);
+  const v = (Number.isFinite(music) ? music : -16) + (Number.isFinite(offset) ? offset : 1);
+  return Math.min(-9, Math.max(-24, v));
+}
+
 export async function saveVoiceNote(
   id: string,
   base64: unknown,
   ffmpegPath: string,
+  opts: { tightenPauses?: boolean; aiVoice?: boolean } = {},
 ): Promise<{ durationSec: number }> {
   if (!ID_RE.test(id) || typeof base64 !== "string" || !base64) {
     throw new Error("Hlasovka chybí.");
@@ -52,7 +60,16 @@ export async function saveVoiceNote(
         "-i", raw,
         "-t", String(VOICE_MAX_SEC + 1),
         "-vn",
-        "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5",
+        "-af",
+        // AI rozhovor: ticho na začátku pryč a dlouhé pauzy mezi replikami zkrácené na ~0,12 s.
+        (opts.tightenPauses
+          ? "silenceremove=start_periods=1:start_threshold=-45dB:stop_periods=-1:stop_duration=0.25:stop_threshold=-45dB:stop_silence=0.12,"
+          : "") +
+          // AI hlas: komprese srovná tiché a hlasité repliky, cíl o 1 dB nad hudbou (RADIO_TARGET_LUFS),
+          // ať je přes ztlumenou hudbu dobře slyšet, ale nekřičí.
+          (opts.aiVoice
+            ? `highpass=f=80,acompressor=threshold=-22dB:ratio=3:attack=5:release=120:makeup=2,loudnorm=I=${aiVoiceLufs()}:TP=-1.5:LRA=6`
+            : "highpass=f=80,loudnorm=I=-16:TP=-1.5"),
         "-ac", "1",
         "-ar", "44100",
         "-c:a", "libmp3lame",

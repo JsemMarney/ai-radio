@@ -14,6 +14,8 @@ export type ListenerMessage = {
   voiceSec?: number;
   read: boolean;
   createdAt: string;
+  /** Textová odpověď moderátora (vidí ji posluchač na webu). */
+  reply?: { from: string; text: string; at: string };
 };
 
 const MAX_MESSAGES = 100;
@@ -72,6 +74,26 @@ export function addMessage(input: {
     await writeAll(list);
     return message;
   });
+}
+
+/** Uloží textovou odpověď moderátora ke vzkazu. */
+export function setMessageReply(id: string, reply: { from: string; text: string }): Promise<boolean> {
+  return serialized(async () => {
+    const list = await readAll();
+    const item = list.find((m) => m.id === id);
+    if (!item) return false;
+    item.reply = { ...reply, at: new Date().toISOString() };
+    await writeAll(list);
+    return true;
+  });
+}
+
+/** Odpovědi k vlastním vzkazům posluchače (id zná jen on — náhodné UUID). */
+export async function repliesFor(ids: string[]): Promise<{ id: string; reply: NonNullable<ListenerMessage["reply"]> }[]> {
+  const wanted = new Set(ids);
+  return (await readAll())
+    .filter((m) => wanted.has(m.id) && m.reply)
+    .map((m) => ({ id: m.id, reply: m.reply! }));
 }
 
 /** read / delete jednoho vzkazu, readAll = vše přečteno. */

@@ -54,3 +54,7 @@ next-env.d.ts
 
 # release ZIPy pro server
 /release
+
+# YouTube cookies (yt-dlp) — tajné, nikdy necommitovat
+cookies.txt
+*.cookies.txt

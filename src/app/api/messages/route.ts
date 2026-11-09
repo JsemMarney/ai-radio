@@ -1,6 +1,6 @@
 import { checkMessageLimit, getBestEffortIp, recordMessage } from "@/lib/login-rate-limit";
 import { resolveFfmpeg } from "@/lib/ffmpeg";
-import { addMessage, newMessageId } from "@/lib/messages";
+import { addMessage, newMessageId, repliesFor } from "@/lib/messages";
 import { saveVoiceNote } from "@/lib/voice-notes";
 import { censor, cleanInput, containsLink } from "@/lib/profanity";
 
@@ -46,5 +46,15 @@ export async function POST(request: Request) {
   }
   await addMessage({ id, from: from.text || null, text: text.text, flagged: from.flagged || text.flagged, voiceSec });
   recordMessage(ip);
-  return Response.json({ ok: true });
+  return Response.json({ ok: true, id });
+}
+
+/** Posluchač si stáhne odpovědi moderátora ke svým vzkazům (?ids=a,b). */
+export async function GET(request: Request) {
+  const ids = (new URL(request.url).searchParams.get("ids") ?? "")
+    .split(",")
+    .filter((id) => /^[0-9a-f-]{36}$/i.test(id))
+    .slice(0, 20);
+  if (!ids.length) return Response.json({ replies: [] });
+  return Response.json({ replies: await repliesFor(ids) }, { headers: { "Cache-Control": "no-store" } });
 }

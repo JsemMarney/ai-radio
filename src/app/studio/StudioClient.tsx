@@ -27,6 +27,7 @@ import { BreakPanel } from "@/components/studio/BreakPanel";
 import { MicPanel } from "@/components/studio/MicPanel";
 import { RequestModeration } from "@/components/studio/RequestModeration";
 import { AiDjPanel } from "@/components/studio/AiDjPanel";
+import { AiHostsPanel } from "@/components/studio/AiHostsPanel";
 import { ListenerChart } from "@/components/studio/ListenerChart";
 import { MessagesPanel } from "@/components/studio/MessagesPanel";
 import { SchedulePanel } from "@/components/studio/SchedulePanel";
@@ -47,10 +48,11 @@ import type {
   StudioQueueItem,
 } from "@/lib/types";
 
-type Tab = "live" | "library" | "stats" | "import" | "system";
+type Tab = "live" | "hosts" | "library" | "stats" | "import" | "system";
 
 const TABS: [Tab, string][] = [
   ["live", "Vysílání"],
+  ["hosts", "Moderátoři"],
   ["library", "Knihovna"],
   ["stats", "Statistiky"],
   ["import", "Import"],
@@ -687,6 +689,8 @@ export function StudioClient({ station }: { station: StationConfig }) {
               </div>
             </nav>
           </div>
+        ) : tab === "hosts" ? (
+          <AiHostsPanel />
         ) : tab === "library" ? (
           <LibraryTab
             library={library}
@@ -863,6 +867,11 @@ function QueueRow({
       </span>
       <Cover src={item.thumbnail} size="sm" className="rounded-[2px]" />
       <div className="min-w-0 flex-1">
+        {item.aiBefore ? (
+          <p className="truncate text-[11px] font-semibold uppercase tracking-wider text-[var(--accent-2)]">
+            AI · {item.aiBefore}
+          </p>
+        ) : null}
         <p className="truncate text-sm">
           {item.stingerBefore ? (
             <span className="mr-1.5 text-xs uppercase tracking-wider text-[var(--ink-faint)]">jingle ·</span>
@@ -874,7 +883,12 @@ function QueueRow({
           {badge ? <span className="text-[var(--accent)]"> · {badge}</span> : null}
         </p>
       </div>
-      <span className="shrink-0 font-[family-name:var(--font-mono)] text-xs text-[var(--ink-faint)] group-hover:hidden">
+      <span className="shrink-0 text-right font-[family-name:var(--font-mono)] text-xs text-[var(--ink-faint)] group-hover:hidden">
+        {item.startsAtMs ? (
+          <span className="block text-[var(--ink-muted)]">
+            {new Date(item.startsAtMs).toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit" })}
+          </span>
+        ) : null}
         {formatLength(item.durationSec)}
       </span>
       <div className="hidden shrink-0 items-center gap-3 group-hover:flex group-focus-within:flex">

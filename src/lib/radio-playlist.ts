@@ -1,4 +1,6 @@
 import { listTracksWithAudio, trackMatchKey } from "@/lib/library";
+import { genreOf } from "@/lib/genres";
+import { stationClock } from "@/lib/station-time";
 import type { RadioNowPlaying } from "@/lib/types";
 
 const TRACK_CACHE_TTL_MS = 30_000;
@@ -113,6 +115,8 @@ export function pickRotationTrack(
   exclude: Set<string> = new Set(),
   /** Kolikrát už skladba hrála — málo hrané dostanou přednost. */
   plays: RotationStats = {},
+  /** Kdy skladba odhadem pojede (pro bloky podle denní doby). */
+  at: Date = new Date(),
 ): string | null {
   const ids = [...catalog.keys()].filter((id) => !exclude.has(id));
   if (!ids.length) return null;
@@ -178,6 +182,7 @@ export function pickRotationTrack(
       const jump = Math.abs(entry.lufs - prev.lufs);
       if (jump > 4) w *= Math.max(0.3, 1 - (jump - 4) * 0.12);
     }
+    w *= styleWeight(id, recent, at);
     return w;
   });
   const sum = weights.reduce((a, b) => a + b, 0);
@@ -187,6 +192,39 @@ export function pickRotationTrack(
     if (roll <= 0) return pool[i]!;
   }
   return pool[pool.length - 1]!;
+}
+
+/** Cílová energie podle denní doby (RADIO_ENERGY_BLOCKS=0 vypne). Ráno nahoru, v noci klid. */
+function energyWindow(at: Date): [number, number] | null {
+  if (process.env.RADIO_ENERGY_BLOCKS === "0") return null;
+  const h = stationClock(at).hour;
+  if (h >= 6 && h < 10) return [4, 5];
+  if (h >= 22 || h < 6) return [1, 3];
+  return null;
+}
+
+/**
+ * Plynulý styl podle žánrů (genres.json): energie se mění po krocích, ne z techna rovnou do balady,
+ * dvě klidné za sebou méně často, tři stejné žánry za sebou málokdy. Bez žánru beze změny.
+ */
+function styleWeight(id: string, recent: string[], at: Date): number {
+  const g = genreOf(id);
+  if (!g) return 1;
+  let w = 1;
+  const p1 = recent[0] ? genreOf(recent[0]) : null;
+  const p2 = recent[1] ? genreOf(recent[1]) : null;
+  if (p1) {
+    const jump = Math.abs(g.energy - p1.energy);
+    w *= [1, 1, 0.5, 0.15, 0.05][jump] ?? 0.05;
+    if (g.energy <= 2 && p1.energy <= 2) w *= 0.3;
+    if (p2 && g.genre === p1.genre && g.genre === p2.genre) w *= 0.35;
+  }
+  const win = energyWindow(at);
+  if (win) {
+    const off = g.energy < win[0] ? win[0] - g.energy : g.energy > win[1] ? g.energy - win[1] : 0;
+    w *= [1, 0.35, 0.1, 0.04][off] ?? 0.04;
+  }
+  return w;
 }
 
 /** Všichni interpreti skladby (hlavní i hosté) normalizovaně. */
@@ -211,11 +249,14 @@ export function fillRotationQueue(
   const limit = Math.min(target, Math.max(0, catalog.size - exclude.size));
   while (out.length < limit) {
     const recent = [...[...out].reverse(), ...context];
+    // Odhad, kdy skladba pojede (~3,5 min na skladbu) — pro energii podle denní doby.
+    const at = new Date(Date.now() + (out.length + 1) * 210_000);
     const pick = pickRotationTrack(
       catalog,
       recent,
       new Set([...out, ...exclude]),
       plays,
+      at,
     );
     if (!pick) break;
     out.push(pick);

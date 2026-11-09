@@ -11,7 +11,11 @@ type Bucket = { count: number; resetAt: number };
 export function getClientIp(request: Request): string | null {
   if (process.env.TRUST_PROXY !== "1") return null;
   const xff = request.headers.get("x-forwarded-for");
-  const last = xff?.split(",").map((s) => s.trim()).filter(Boolean).at(-1);
+  const last = xff
+    ?.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .at(-1);
   return last || request.headers.get("x-real-ip")?.trim() || null;
 }
 
@@ -38,7 +42,10 @@ class RateLimiter {
   private load(): void {
     if (!this.file || !existsSync(this.file)) return;
     try {
-      const raw = JSON.parse(readFileSync(this.file, "utf8")) as Record<string, Bucket>;
+      const raw = JSON.parse(readFileSync(this.file, "utf8")) as Record<
+        string,
+        Bucket
+      >;
       const now = Date.now();
       for (const [k, b] of Object.entries(raw)) {
         if (b.resetAt > now) this.buckets.set(k, b);
@@ -52,7 +59,11 @@ class RateLimiter {
     if (!this.file) return;
     try {
       mkdirSync(path.dirname(this.file), { recursive: true });
-      writeFileSync(this.file, JSON.stringify(Object.fromEntries(this.buckets)), "utf8");
+      writeFileSync(
+        this.file,
+        JSON.stringify(Object.fromEntries(this.buckets)),
+        "utf8",
+      );
     } catch {
       // limit funguje dál v paměti
     }
@@ -63,7 +74,10 @@ class RateLimiter {
     const b = this.buckets.get(key);
     if (!b || now >= b.resetAt) return { allowed: true, retryAfterSec: 0 };
     if (b.count >= this.max) {
-      return { allowed: false, retryAfterSec: Math.ceil((b.resetAt - now) / 1000) };
+      return {
+        allowed: false,
+        retryAfterSec: Math.ceil((b.resetAt - now) / 1000),
+      };
     }
     return { allowed: true, retryAfterSec: 0 };
   }
@@ -76,7 +90,8 @@ class RateLimiter {
     } else {
       b.count += 1;
     }
-    for (const [k, v] of this.buckets) if (v.resetAt <= now) this.buckets.delete(k);
+    for (const [k, v] of this.buckets)
+      if (v.resetAt <= now) this.buckets.delete(k);
     this.save();
   }
 
@@ -91,7 +106,11 @@ const WINDOW_MS = 15 * 60 * 1000;
 /** Na jednu IP (jen za důvěryhodnou proxy). */
 const perIp = new RateLimiter(5, WINDOW_MS, stateFile(".login-limits.json"));
 /** Pro všechny dohromady — brzda, i když IP neznáme nebo ji útočník střídá. */
-const global = new RateLimiter(20, WINDOW_MS, stateFile(".login-limits-global.json"));
+const global = new RateLimiter(
+  20,
+  WINDOW_MS,
+  stateFile(".login-limits-global.json"),
+);
 const GLOBAL_KEY = "*";
 
 export function checkLoginRateLimit(ip: string | null): {
@@ -114,12 +133,16 @@ export function clearLoginAttempts(ip: string | null): void {
 
 // ───────── přání posluchačů ─────────
 
+/** Přání na jednu IP za hodinu (RADIO_REQUESTS_PER_HOUR, výchozí 1). */
 const requestLimiter = new RateLimiter(
-  Number(process.env.RADIO_REQUESTS_PER_IP ?? 2) || 2,
-  10 * 60 * 1000,
+  Math.max(1, Number(process.env.RADIO_REQUESTS_PER_HOUR ?? 1) || 1),
+  60 * 60 * 1000,
 );
 
-export function checkSongRequestLimit(ip: string): { allowed: boolean; retryAfterSec: number } {
+export function checkSongRequestLimit(ip: string): {
+  allowed: boolean;
+  retryAfterSec: number;
+} {
   return requestLimiter.check(ip);
 }
 
@@ -135,7 +158,10 @@ const suggestLimiter = new RateLimiter(
 );
 const searchLimiter = new RateLimiter(40, 60 * 1000);
 
-export function checkSuggestLimit(ip: string): { allowed: boolean; retryAfterSec: number } {
+export function checkSuggestLimit(ip: string): {
+  allowed: boolean;
+  retryAfterSec: number;
+} {
   return suggestLimiter.check(ip);
 }
 
@@ -158,7 +184,10 @@ const messageLimiter = new RateLimiter(
   10 * 60 * 1000,
 );
 
-export function checkMessageLimit(ip: string): { allowed: boolean; retryAfterSec: number } {
+export function checkMessageLimit(ip: string): {
+  allowed: boolean;
+  retryAfterSec: number;
+} {
   return messageLimiter.check(ip);
 }
 

@@ -41,6 +41,7 @@ export async function GET(request: Request) {
         breakState: "none",
         moderator: null,
         moderatorOnAir: false,
+        aiHost: null,
         tickerMessages: [],
         bed: "builtin",
         bedLevelDb: -10,

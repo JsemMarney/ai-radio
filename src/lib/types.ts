@@ -172,6 +172,10 @@ export type QueueItemSource = "prepared" | "request" | "rotation";
 export type StudioQueueItem = RadioNowPlaying & {
   source: QueueItemSource;
   stingerBefore?: boolean;
+  /** Odhad startu (unix ms). */
+  startsAtMs?: number;
+  /** Odhad: přes začátek promluví AI moderátor (jména). */
+  aiBefore?: string;
 };
 
 export type LibraryStatsRow = {

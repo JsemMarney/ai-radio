@@ -126,6 +126,23 @@ function fixBuildPaths() {
   }
 }
 
+// ───────── upozornění na Discord (DISCORD_WEBHOOK_URL) ─────────
+
+let lastAlertAt = 0;
+function discordAlert(message) {
+  const url = (process.env.DISCORD_WEBHOOK_URL || "").trim();
+  if (!/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(url)) return;
+  // Při opakovaném padání nejvýš jednou za 10 minut.
+  if (Date.now() - lastAlertAt < 10 * 60_000) return;
+  lastAlertAt = Date.now();
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: `📻 **Miss Radio** — ${message}`, allowed_mentions: { parse: [] } }),
+    signal: AbortSignal.timeout(10_000),
+  }).catch(() => {});
+}
+
 // ───────── broadcaster ─────────
 
 let broadcaster = null;
@@ -144,6 +161,7 @@ function startBroadcaster() {
     // Rychlý pád hned po startu → čekat déle, ať se to netočí dokola.
     restartDelay = Date.now() - startedAt > 60_000 ? 1000 : Math.min(restartDelay * 2, 30_000);
     log(`Broadcaster skončil (kód ${code}), restart za ${restartDelay / 1000} s…`);
+    discordAlert(`🔴 Vysílání spadlo (kód ${code}) — restartuji za ${restartDelay / 1000} s.`);
     setTimeout(startBroadcaster, restartDelay);
   });
 }

@@ -72,6 +72,8 @@ cpSync(path.join(ROOT, ".next"), path.join(STAGE, ".next"), {
 cpSync(path.join(ROOT, "public"), path.join(STAGE, "public"), { recursive: true });
 mkdirSync(path.join(STAGE, "config"), { recursive: true });
 cpSync(path.join(ROOT, "config", "icecast.example.xml"), path.join(STAGE, "config", "icecast.example.xml"));
+// Český slovník pro kontrolu slov AI moderátora (GPL-2.0, viz config/dict/LICENSE-cs).
+cpSync(path.join(ROOT, "config", "dict"), path.join(STAGE, "config", "dict"), { recursive: true });
 
 const deploy = path.join(ROOT, "deploy", "pterodactyl");
 for (const name of ["index.js", "README.md"]) {
@@ -79,7 +81,9 @@ for (const name of ["index.js", "README.md"]) {
 }
 // Hotové nastavení serveru (deploy/pterodactyl/.env.local, v gitu ignorované)
 // jde do ZIPu rovnou jako .env.local; jinak jen šablona k vyplnění.
-const envFile = existsSync(path.join(deploy, ".env.local")) ? ".env.local" : ".env.example";
+// --no-env = aktualizace: na serveru zůstane jeho .env.local (v ZIPu jen šablona .env.example).
+const noEnv = process.argv.includes("--no-env");
+const envFile = !noEnv && existsSync(path.join(deploy, ".env.local")) ? ".env.local" : ".env.example";
 cpSync(path.join(deploy, envFile), path.join(STAGE, envFile));
 
 // 5) package.json jen s tím, co server opravdu potřebuje
@@ -129,5 +133,7 @@ console.log(`\n✓ Hotovo: release/${zipName} (${mb} MB)`);
 console.log(
   envFile === ".env.local"
     ? "  Obsahuje .env.local (tajné údaje!) — nahraj na Pterodactyl, rozbal, MAIN_FILE = index.js."
-    : "  Nahraj na Pterodactyl, rozbal, .env.example → .env.local, MAIN_FILE = index.js.",
+    : noEnv
+      ? "  Aktualizace: nahraj a rozbal přes stávající soubory — .env.local a downloads/ na serveru zůstanou."
+      : "  Nahraj na Pterodactyl, rozbal, .env.example → .env.local, MAIN_FILE = index.js.",
 );

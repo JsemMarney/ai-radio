@@ -23,7 +23,25 @@ import {
 } from "@/lib/ffmpeg";
 import { c, formatDuration, radioLog } from "@/lib/radio-log";
 import { ListenerStats, type ListenerStatsSummary } from "@/lib/listener-stats";
-import { AiDj, pickFocus, type AiDjState, type DjContext } from "@/lib/ai-dj";
+import {
+  AiDj,
+  czechTime,
+  isNightHour,
+  pickFocus,
+  type AiDjFocus,
+  type AiDjState,
+  type DjContext,
+} from "@/lib/ai-dj";
+import { stationClock } from "@/lib/station-time";
+import { sendAlert } from "@/lib/alerts";
+import {
+  genreOf,
+  genrePrompt,
+  loadGenres,
+  parseGenreReply,
+  saveGenres,
+  type GenreInfo,
+} from "@/lib/genres";
 import { listMessages } from "@/lib/messages";
 import { getStationConfig } from "@/lib/station-config";
 import {
@@ -33,7 +51,12 @@ import {
   saveSchedule,
   type ScheduleEntry,
 } from "@/lib/scheduler";
-import { getDownloadsDir, getTrack, listTracks, trackMatchKey } from "@/lib/library";
+import {
+  getDownloadsDir,
+  getTrack,
+  listTracks,
+  trackMatchKey,
+} from "@/lib/library";
 import {
   getMixAnalysis,
   loudnessGain,
@@ -41,7 +64,11 @@ import {
   type MixAnalysis,
 } from "@/lib/mix-analysis";
 import { MicInput } from "@/lib/mic-input";
-import { cleanupVoiceNotes, saveVoiceNote, voiceNotePath } from "@/lib/voice-notes";
+import {
+  cleanupVoiceNotes,
+  saveVoiceNote,
+  voiceNotePath,
+} from "@/lib/voice-notes";
 import { listBedOptions, resolveBedPath, type BedOption } from "@/lib/talk-bed";
 import { PcmDeck, SAMPLE_RATE } from "@/lib/pcm-deck";
 import {
@@ -126,6 +153,8 @@ export type RadioStatus = {
   moderator: string | null;
   /** Moderátor se nedávno ozval (mikrofon / nastavil jméno) — jinak posluchači vidí AutoDJ. */
   moderatorOnAir: boolean;
+  /** AI moderátor(ři), kteří mají teď směnu („Anna & Petr“) — null = AutoDJ. */
+  aiHost: string | null;
   /** Vlastní texty do běžícího pruhu. */
   tickerMessages: string[];
   bed: string;
@@ -229,7 +258,9 @@ function getFallbackPaths(midsongPaths: string[]): string[] {
     for (const part of raw.split(",")) {
       const p = part.trim();
       if (!p) continue;
-      const resolved = existsSync(p) ? path.resolve(p) : path.join(process.cwd(), p);
+      const resolved = existsSync(p)
+        ? path.resolve(p)
+        : path.join(process.cwd(), p);
       if (existsSync(resolved)) out.push(resolved);
     }
     return out;
@@ -277,9 +308,17 @@ export class RadioEngine {
   private djTracks = 0;
   /** Po kolika skladbách přijde další AI vstup (losuje se v rozsahu z nastavení). */
   private djGap: number | null = null;
+  /** Předem vylosované další rozestupy AI vstupů — fronta ve studiu ukazuje přesný plán. */
+  private djPlan: number[] = [];
   private djRound = 0;
-  private djClip: { id: string; forUuid: string } | null = null;
+  private djClip: { id: string; forUuid: string; outroSec?: number } | null =
+    null;
+  /** Hodina, ve které už zazněly zprávy v celou („2026-11-06 20“). */
+  private djHourlyKey: string | null = null;
+  /** Od kdy čeká předávka směny, než bude moct AI mluvit. */
+  private shiftPendingSince: number | null = null;
   private djUsedNotes = new Set<string>();
+  private djClipLabel: string | null = null;
   private schedule: ScheduleEntry[] = [];
   private clockStart = 0;
   private frame = 0;
@@ -325,6 +364,32 @@ export class RadioEngine {
   private micMixedLive = false;
   private micLive = false;
   private voiceClip: PcmDeck | null = null;
+  /** Hlasitost a ztlumení hudby pro aktuální klip (AI v noci tišeji, hudba níž). */
+  private clipGain = 1;
+  private clipNight = false;
+  /**
+   * Přání s hlasovkou: skladba počká — nejdřív hlasovka, pak odpověď AI a skladba
+   * pomalu naběhne pod konec odpovědi.
+   */
+  private voiceIntro: {
+    uuid: string;
+    requestId: string;
+    stage: "wait" | "voice" | "reply";
+    busy: boolean;
+    since: number;
+    voiceEndedAt: number | null;
+    replyEndFrame: number | null;
+  } | null = null;
+  /** Připravené odpovědi AI na hlasovky přání (id přání → vstup). */
+  private voiceReplies = new Map<
+    string,
+    {
+      done: boolean;
+      seg: { id: string; label: string; durationSec: number } | null;
+    }
+  >();
+  /** Hlasovky, které už zazněly před skladbou (nepouštět znovu na začátku). */
+  private introHandled = new Set<string>();
   private moderator: string | null = null;
   /** Kdy moderátor naposledy mluvil nebo se přihlásil jménem (0 = od startu ne). */
   private hostActiveAt = 0;
@@ -343,6 +408,8 @@ export class RadioEngine {
     fadeSec: 4,
   };
   private midsongCountdown = 0;
+  /** Předem vylosované další rozestupy jinglů. */
+  private midsongPlan: number[] = [];
   private midsongDurationSec = 6;
 
   private upcomingCache: RadioNowPlaying[] = [];
@@ -415,6 +482,7 @@ export class RadioEngine {
       breakState: this.breakState,
       moderator: this.moderator,
       moderatorOnAir: this.isModeratorOnAir(),
+      aiHost: this.currentAiHost(),
       tickerMessages: this.tickerMessages,
       bed: this.bedChoice,
       bedLevelDb: this.bedLevelDb,
@@ -465,6 +533,7 @@ export class RadioEngine {
       String(this.micLive),
       String(this.pendingRequests.length),
       this.breakState,
+      this.currentAiHost() ?? "",
     ].join("|");
     if (!force && key === this.lastStatusKey) return;
     this.lastStatusKey = key;
@@ -516,7 +585,10 @@ export class RadioEngine {
             enqueue: (chunk) => {
               if (closed) return;
               // Pomalý klient (desítky sekund pozadu) — odpojit, ať nežere paměť.
-              if (controller.desiredSize !== null && controller.desiredSize < -1500) {
+              if (
+                controller.desiredSize !== null &&
+                controller.desiredSize < -1500
+              ) {
                 this.unsubscribe(subscriber);
                 return;
               }
@@ -588,7 +660,10 @@ export class RadioEngine {
     const limit = Math.floor(out.bytesPerSec * getBurstSec());
     out.burst.push(Buffer.from(frames));
     out.burstBytes += frames.length;
-    while (out.burst.length > 1 && out.burstBytes - out.burst[0]!.length >= limit) {
+    while (
+      out.burst.length > 1 &&
+      out.burstBytes - out.burst[0]!.length >= limit
+    ) {
       out.burstBytes -= out.burst.shift()!.length;
     }
   }
@@ -628,13 +703,20 @@ export class RadioEngine {
     this.requestLog = boot.requestLog ?? [];
     this.moderator = boot.moderator ?? null;
     await this.listenerStats.load();
+    this.aiDj.listenedShare = (hour) => this.listenerStats.listenedShare(hour);
     await this.aiDj.load();
+    await loadGenres();
+    // Žánry: první dávka po minutě, pak každých 10 minut, dokud knihovna nemá všechno.
+    setTimeout(() => void this.classifyGenresTick(), 60_000);
+    setInterval(() => void this.classifyGenresTick(), 10 * 60_000).unref?.();
     this.schedule = await loadSchedule();
     this.tickerMessages = boot.tickerMessages ?? [];
     void cleanupVoiceNotes().catch(() => {});
 
     const catalog = await getCatalog();
-    this.requests = (boot.listenerRequests ?? []).filter((id) => catalog.has(id));
+    this.requests = (boot.listenerRequests ?? []).filter((id) =>
+      catalog.has(id),
+    );
     this.history = (
       boot.rotationHistory?.length
         ? boot.rotationHistory
@@ -659,7 +741,10 @@ export class RadioEngine {
     this.startPump();
 
     // Navázat tam, kde rádio skončilo (když restart přišel uprostřed skladby).
-    const resumed = await this.tryResume(boot.nowPlaying?.uuid, boot.trackStartedAt);
+    const resumed = await this.tryResume(
+      boot.nowPlaying?.uuid,
+      boot.trackStartedAt,
+    );
     if (!resumed) this.nowPlaying = null;
 
     await this.refillQueue();
@@ -807,10 +892,10 @@ export class RadioEngine {
       this.main?.kind === "bed"
         ? "talk"
         : this.main?.kind === "stinger"
-        ? "stinger"
-        : this.tails.some((v) => v.kind === "track")
-          ? "crossfade"
-          : "song";
+          ? "stinger"
+          : this.tails.some((v) => v.kind === "track")
+            ? "crossfade"
+            : "song";
     if (segment !== this.mixedSegment) {
       this.mixedSegment = segment;
       this.announce(() => {
@@ -824,13 +909,23 @@ export class RadioEngine {
    * Přimíchá mikrofon a ztlumí pod ním hudbu, když moderátor mluví
    * (detekce hlasu s krátkým podržením, plynulý náběh i návrat).
    */
-  private mixMic(acc: Float32Array, n: number, f0: number, monitor: Float32Array | null): void {
+  private mixMic(
+    acc: Float32Array,
+    n: number,
+    f0: number,
+    monitor: Float32Array | null,
+  ): void {
     const mic = this.mic?.active ? this.mic : null;
     const live = Boolean(mic);
     if (live !== this.micMixedLive) {
       this.micMixedLive = live;
       this.hostActiveAt = Date.now();
-      if (live) radioLog("🎙", c.boldRed("MIKROFON ZAPNUT") + (this.moderator ? c.red(` — ${this.moderator}`) : ""));
+      if (live)
+        radioLog(
+          "🎙",
+          c.boldRed("MIKROFON ZAPNUT") +
+            (this.moderator ? c.red(` — ${this.moderator}`) : ""),
+        );
       else radioLog("🎙", c.dim("mikrofon vypnut"));
       this.announce(() => {
         this.micLive = live;
@@ -846,7 +941,9 @@ export class RadioEngine {
     const clipPcm = this.voiceClip ? this.voiceClip.read(n) : null;
 
     if (!mic && !clipPcm && this.duckGain > 0.999) {
-      if (monitor) for (let i = 0; i < n; i++) monitor[i] = (acc[i * 2]! + acc[i * 2 + 1]!) / 2;
+      if (monitor)
+        for (let i = 0; i < n; i++)
+          monitor[i] = (acc[i * 2]! + acc[i * 2 + 1]!) / 2;
       return;
     }
 
@@ -859,17 +956,23 @@ export class RadioEngine {
       }
     }
     if (clipPcm) this.duckHoldUntil = f0 + n + secToFrames(DUCK_HOLD_SEC);
-    const target = (voice || clipPcm) && f0 < this.duckHoldUntil ? this.duckLevel : 1;
+    const duck =
+      clipPcm && !voice && this.clipNight
+        ? this.duckLevel * 0.5
+        : this.duckLevel;
+    const target = (voice || clipPcm) && f0 < this.duckHoldUntil ? duck : 1;
     const attack = 1 - Math.exp(-1 / (DUCK_ATTACK_SEC * SAMPLE_RATE));
     const release = 1 - Math.exp(-1 / (DUCK_RELEASE_SEC * SAMPLE_RATE));
     const micScale = 32767 * this.micGain;
 
     for (let i = 0; i < n; i++) {
-      this.duckGain += (target - this.duckGain) * (target < this.duckGain ? attack : release);
-      const clipSample = clipPcm ? clipPcm[i * 2]! : 0;
+      this.duckGain +=
+        (target - this.duckGain) * (target < this.duckGain ? attack : release);
+      const clipSample = clipPcm ? clipPcm[i * 2]! * this.clipGain : 0;
       const v = (voice ? voice[i]! * micScale : 0) + clipSample;
       if (monitor) {
-        monitor[i] = ((acc[i * 2]! + acc[i * 2 + 1]!) / 2) * this.duckGain + clipSample;
+        monitor[i] =
+          ((acc[i * 2]! + acc[i * 2 + 1]!) / 2) * this.duckGain + clipSample;
       }
       acc[i * 2] = acc[i * 2]! * this.duckGain + v;
       acc[i * 2 + 1] = acc[i * 2 + 1]! * this.duckGain + v;
@@ -881,11 +984,29 @@ export class RadioEngine {
   private clockTick(): void {
     this.clockTicks++;
     // Posluchači: vzorek jednou za minutu, na disk každých 10 minut.
-    if (this.clockTicks % 3 === 0) this.listenerStats.record(this.listenerCount);
+    if (this.clockTicks % 3 === 0)
+      this.listenerStats.record(this.listenerCount);
     if (this.clockTicks % 30 === 0) {
-      void this.listenerStats.save().catch((err: unknown) => console.warn("[stats] Uložení selhalo:", err));
+      void this.listenerStats
+        .save()
+        .catch((err: unknown) => console.warn("[stats] Uložení selhalo:", err));
     }
     void this.runSchedule();
+    // Začátek / konec směny AI moderátora → posluchači hned vidí, kdo moderuje.
+    this.emitStatus();
+  }
+
+  /** Jména AI moderátorů se směnou, když AI moderátor běží (jinak null = AutoDJ). */
+  private currentAiHost(): string | null {
+    if (!this.aiDj.config.enabled || !this.aiDj.isConfigured()) return null;
+    const names = this.aiDj
+      .hostsAt(new Date(), this.djFallbackName())
+      .map((h) => h.name);
+    return names.length ? names.join(" & ") : null;
+  }
+
+  private djFallbackName(): string {
+    return process.env.AI_DJ_NAME?.trim() || this.moderator || "AI moderátor";
   }
 
   private async runSchedule(): Promise<void> {
@@ -896,12 +1017,20 @@ export class RadioEngine {
       const label = e.label ? ` — ${e.label}` : "";
       if (e.action === "track" && e.trackUuid) {
         const ok = await this.playNext(e.trackUuid);
-        radioLog("⏰", c.blue(`Plán ${e.time}: skladba jako další${label}`), ok ? undefined : "nepodařilo se");
-      } else {
-        const res = await this.controlBreak(e.action === "break-now" ? "now" : "arm");
         radioLog(
           "⏰",
-          c.blue(`Plán ${e.time}: ${e.action === "break-now" ? "pauza hned" : "pauza po skladbě"}${label}`),
+          c.blue(`Plán ${e.time}: skladba jako další${label}`),
+          ok ? undefined : "nepodařilo se",
+        );
+      } else {
+        const res = await this.controlBreak(
+          e.action === "break-now" ? "now" : "arm",
+        );
+        radioLog(
+          "⏰",
+          c.blue(
+            `Plán ${e.time}: ${e.action === "break-now" ? "pauza hned" : "pauza po skladbě"}${label}`,
+          ),
           res.ok ? undefined : res.error,
         );
       }
@@ -916,7 +1045,9 @@ export class RadioEngine {
     return this.schedule;
   }
 
-  async setSchedule(input: unknown): Promise<{ ok: boolean; error?: string; entries?: ScheduleEntry[] }> {
+  async setSchedule(
+    input: unknown,
+  ): Promise<{ ok: boolean; error?: string; entries?: ScheduleEntry[] }> {
     const clean = sanitizeSchedule(input, this.schedule);
     if (typeof clean === "string") return { ok: false, error: clean };
     this.schedule = clean;
@@ -936,15 +1067,23 @@ export class RadioEngine {
   }
 
   /** Pustí hlasovku posluchače do éteru (přes hudbu, ta se ztlumí). */
-  async playVoiceNote(requestId: string, label?: string): Promise<{ ok: boolean; error?: string }> {
+  async playVoiceNote(
+    requestId: string,
+    label?: string,
+    opts?: { noReply?: boolean },
+  ): Promise<{ ok: boolean; error?: string }> {
     const request = this.requestLog.find((r) => r.id === requestId);
     // Bez přání = hlasovka ze vzkazu do studia (stejná složka _voice).
     const file = !request || request.hasVoice ? voiceNotePath(requestId) : null;
-    if (!file || !this.ffmpegPath) return { ok: false, error: "Hlasovka nenalezena." };
+    if (!file || !this.ffmpegPath)
+      return { ok: false, error: "Hlasovka nenalezena." };
     const deck = new PcmDeck(this.ffmpegPath, file).start();
     await deck.waitReady();
     this.voiceClip?.dispose();
     this.voiceClip = deck;
+    // AI v noci: hlas o 2,5 dB tišší a hudba pod ním ztlumená o dalších 6 dB.
+    this.clipNight = !!label && isNightHour(stationClock().hour);
+    this.clipGain = this.clipNight ? Math.pow(10, -2.5 / 20) : 1;
     if (label) radioLog("🤖", c.cyan(`${label} mluví`));
     else
       radioLog(
@@ -952,7 +1091,65 @@ export class RadioEngine {
         c.magenta(`Hlasovka do éteru — ${request?.from ?? "posluchač"}`),
         request ? `k „${request.title}“` : "vzkaz do studia",
       );
+    // Hlasovka posluchače → AI na ni po přehrání krátce odpoví.
+    if (!label && !opts?.noReply)
+      void this.replyToVoice(
+        file,
+        request?.from ?? null,
+        request ? undefined : requestId,
+      );
     return { ok: true };
+  }
+
+  private async replyToVoice(
+    file: string,
+    from: string | null,
+    messageId?: string,
+  ): Promise<void> {
+    const s = this.aiDj.config;
+    const ffmpegPath = this.ffmpegPath;
+    if (
+      !s.enabled ||
+      !ffmpegPath ||
+      !this.aiDj.isConfigured() ||
+      this.aiDj.isBusy ||
+      !this.aiDj.budget().canSpeak
+    )
+      return;
+    if (!this.aiDj.hostsAt(new Date(), this.djFallbackName()).length) return;
+    if (!this.hasListeners()) return;
+    try {
+      const text = await this.aiDj.transcribe(file);
+      if (!text) return;
+      const ctx = await this.buildDjContext(
+        this.nowPlaying,
+        null,
+        "voice-reply",
+        { id: messageId, from, text },
+      );
+      const seg = await this.aiDj.createSegment(ctx, ffmpegPath, true);
+      // Počkat, až hlasovka dohraje (max. minuta).
+      for (let i = 0; i < 120 && this.voiceClip; i++)
+        await new Promise((r) => setTimeout(r, 500));
+      if (
+        !this.started ||
+        this.voiceClip ||
+        !this.canDjSpeak() ||
+        !this.hasListeners()
+      )
+        return;
+      const played = await this.playVoiceNote(
+        seg.id,
+        seg.hosts.join(" & ") || "AI moderátor",
+      );
+      // Odpověď je vstup jako každý jiný → mezera se počítá znovu od ní.
+      if (played.ok) this.resetDjGap();
+    } catch (err) {
+      console.warn(
+        "[ai-dj] odpověď na hlasovku:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   stopVoiceNote(): void {
@@ -969,13 +1166,16 @@ export class RadioEngine {
     if (this.micLive || this.mic?.active) return true;
     const raw = Number(process.env.RADIO_MODERATOR_IDLE_MIN ?? 30);
     const idleMin = Number.isFinite(raw) && raw > 0 ? raw : 30;
-    return this.hostActiveAt > 0 && Date.now() - this.hostActiveAt < idleMin * 60_000;
+    return (
+      this.hostActiveAt > 0 && Date.now() - this.hostActiveAt < idleMin * 60_000
+    );
   }
 
   /** Jméno moderátora, které vidí posluchači (prázdné = skrýt). */
   setModerator(name: unknown): { ok: boolean; error?: string } {
     const clean = cleanInput(name, 40);
-    if (containsLink(clean)) return { ok: false, error: "Odkaz do jména nepatří." };
+    if (containsLink(clean))
+      return { ok: false, error: "Odkaz do jména nepatří." };
     this.moderator = censor(clean).text || null;
     this.hostActiveAt = this.moderator ? Date.now() : 0;
     void this.persistRotation();
@@ -990,7 +1190,8 @@ export class RadioEngine {
       .map((m) => cleanInput(m, 140))
       .filter(Boolean)
       .slice(0, 5);
-    if (clean.some(containsLink)) return { ok: false, error: "Odkazy do pruhu nepatří." };
+    if (clean.some(containsLink))
+      return { ok: false, error: "Odkazy do pruhu nepatří." };
     this.tickerMessages = clean.map((m) => censor(m).text);
     void this.persistRotation();
     this.emitStatus(true);
@@ -1012,7 +1213,8 @@ export class RadioEngine {
   setMicSettings(settings: { duckDb?: unknown; micGainDb?: unknown }): void {
     const duck = Number(settings.duckDb);
     if (Number.isFinite(duck)) {
-      this.duckLevel = duck <= -60 ? 0 : Math.pow(10, Math.min(0, Math.max(-60, duck)) / 20);
+      this.duckLevel =
+        duck <= -60 ? 0 : Math.pow(10, Math.min(0, Math.max(-60, duck)) / 20);
     }
     const gain = Number(settings.micGainDb);
     if (Number.isFinite(gain)) {
@@ -1024,6 +1226,149 @@ export class RadioEngine {
     if (v.fadeOutStart !== null) return;
     v.fadeOutStart = startFrame;
     v.fadeOutFrames = Math.max(1, frames);
+  }
+
+  /** Je další skladba přání s hlasovkou, která má zaznít před ní? */
+  private voiceIntroFor(nxt: PreparedTrack): boolean {
+    if (this.voiceIntro?.uuid === nxt.uuid) return true;
+    if (nxt.source !== "request" || this.breakState !== "none") return false;
+    const req = [...this.requestLog]
+      .reverse()
+      .find((r) => r.uuid === nxt.uuid && r.status === "approved");
+    if (!req?.hasVoice || !req.autoApproved || this.introHandled.has(req.id))
+      return false;
+    this.voiceIntro = {
+      uuid: nxt.uuid,
+      requestId: req.id,
+      stage: "wait",
+      busy: false,
+      since: Date.now(),
+      voiceEndedAt: null,
+      replyEndFrame: null,
+    };
+    return true;
+  }
+
+  /**
+   * Hlasovka před přáním: ticho → hlasovka → odpověď AI → skladba naběhne
+   * (pomalu, pod posledními vteřinami odpovědi). Vrací true, dokud skladba čeká.
+   */
+  private runVoiceIntro(nxt: PreparedTrack, f: number): boolean {
+    const intro = this.voiceIntro;
+    if (!intro || intro.uuid !== nxt.uuid) return false;
+    const start = (fadeSec: number) => {
+      this.introHandled.add(intro.requestId);
+      this.voiceIntro = null;
+      this.startTrack(nxt, f, fadeSec);
+      return true;
+    };
+    // Pojistka: nic nesmí držet vysílání v tichu déle než 3 minuty.
+    if (Date.now() - intro.since > 3 * 60_000) return start(1);
+    if (intro.busy) return true;
+    if (intro.stage === "wait") {
+      intro.busy = true;
+      this.introHandled.add(intro.requestId);
+      void this.playVoiceNote(intro.requestId, undefined, { noReply: true })
+        .then((r) => {
+          intro.stage = "voice";
+          if (!r.ok) intro.voiceEndedAt = Date.now();
+        })
+        .catch(() => {
+          intro.stage = "voice";
+        })
+        .finally(() => (intro.busy = false));
+      return true;
+    }
+    if (intro.stage === "voice") {
+      if (this.voiceClip) return true;
+      intro.voiceEndedAt ??= Date.now();
+      const reply = this.voiceReplies.get(intro.requestId);
+      // Odpověď se ještě píše → počkat nejvýš 10 s, pak radši hudba.
+      if (reply && !reply.done && Date.now() - intro.voiceEndedAt < 10_000)
+        return true;
+      this.voiceReplies.delete(intro.requestId);
+      const seg = reply?.seg;
+      if (!seg || !this.canDjSpeak()) return start(2.5);
+      intro.busy = true;
+      void this.playVoiceNote(seg.id, seg.label)
+        .then((r) => {
+          intro.stage = "reply";
+          if (r.ok) this.resetDjGap();
+          intro.replyEndFrame = r.ok
+            ? this.frame + secToFrames(seg.durationSec)
+            : this.frame;
+        })
+        .catch(() => {
+          intro.stage = "reply";
+          intro.replyEndFrame = this.frame;
+        })
+        .finally(() => (intro.busy = false));
+      return true;
+    }
+    // Odpověď běží: skladba naběhne pomalu ~6 s před jejím koncem.
+    const lead = secToFrames(6);
+    if (intro.replyEndFrame !== null && f >= intro.replyEndFrame - lead)
+      return start(6);
+    if (!this.voiceClip) return start(2);
+    return true;
+  }
+
+  /** Hned po schválení přání s hlasovkou: přepis + odpověď AI, ať je hotová, než přání pojede. */
+  private prepareVoiceReply(
+    req: ListenerRequest,
+    transcript: string | null,
+  ): void {
+    const s = this.aiDj.config;
+    const ffmpegPath = this.ffmpegPath;
+    if (
+      !req.hasVoice ||
+      !s.enabled ||
+      !ffmpegPath ||
+      !this.aiDj.isConfigured() ||
+      !this.aiDj.budget().canSpeak ||
+      !this.hasListeners() ||
+      !this.aiDj.hostsAt(new Date(), this.djFallbackName()).length
+    )
+      return;
+    const slot: {
+      done: boolean;
+      seg: { id: string; label: string; durationSec: number } | null;
+    } = { done: false, seg: null };
+    this.voiceReplies.set(req.id, slot);
+    void (async () => {
+      try {
+        const text =
+          transcript ??
+          (await this.aiDj.transcribe(voiceNotePath(req.id) ?? ""));
+        if (!text) return;
+        // Počkat, až AI dokončí rozpracovaný vstup (jeden hlas najednou).
+        for (let i = 0; i < 90 && this.aiDj.isBusy; i++)
+          await new Promise((r) => setTimeout(r, 1000));
+        const ctx = await this.buildDjContext(
+          this.nowPlaying,
+          null,
+          "voice-reply",
+          {
+            from: req.from,
+            text: `${text}
+(Posluchač si k tomu přeje: ${req.artist} — ${req.title}. Ta písnička začne hned po tvé odpovědi — na konci ji krátce uveď.)`,
+          },
+        );
+        const seg = await this.aiDj.createSegment(ctx, ffmpegPath, true);
+        slot.seg = {
+          id: seg.id,
+          label: seg.hosts.join(" & ") || "AI moderátor",
+          durationSec: seg.durationSec,
+        };
+      } catch (err) {
+        console.warn(
+          "[ai-dj] odpověď na hlasovku přání:",
+          err instanceof Error ? err.message : err,
+        );
+      } finally {
+        slot.done = true;
+      }
+    })();
   }
 
   private retireMain(f: number, fadeSec: number): void {
@@ -1053,7 +1398,11 @@ export class RadioEngine {
     }
     const loopFade = secToFrames(2.5);
     if ((remaining <= loopFade || m.deck.ended) && this.bedPrepared) {
-      this.fadeOut(m, f, Math.max(secToFrames(0.3), Math.min(remaining, loopFade)));
+      this.fadeOut(
+        m,
+        f,
+        Math.max(secToFrames(0.3), Math.min(remaining, loopFade)),
+      );
       this.startBed(f, 2.5);
     } else if (m.deck.ended && !this.bedPrepared) {
       void this.prepareBed();
@@ -1125,7 +1474,11 @@ export class RadioEngine {
     action: string,
     options: { bed?: unknown; bedLevelDb?: unknown } = {},
   ): Promise<{ ok: boolean; error?: string }> {
-    if (typeof options.bed === "string" && options.bed && options.bed !== this.bedChoice) {
+    if (
+      typeof options.bed === "string" &&
+      options.bed &&
+      options.bed !== this.bedChoice
+    ) {
       this.bedChoice = options.bed.slice(0, 80);
       this.bedPrepared?.deck.dispose();
       this.bedPrepared = null;
@@ -1150,7 +1503,10 @@ export class RadioEngine {
         if (!this.bedPrepared) {
           this.breakState = "none";
           this.breakNow = false;
-          return { ok: false, error: "Podkres se nepodařilo připravit (ffmpeg?)." };
+          return {
+            ok: false,
+            error: "Podkres se nepodařilo připravit (ffmpeg?).",
+          };
         }
         break;
       case "cancel":
@@ -1160,7 +1516,8 @@ export class RadioEngine {
         }
         break;
       case "resume":
-        if (this.breakState !== "on") return { ok: false, error: "Pauza neběží." };
+        if (this.breakState !== "on")
+          return { ok: false, error: "Pauza neběží." };
         this.breakResume = true;
         if (!this.next) void this.prepareNext();
         break;
@@ -1180,6 +1537,7 @@ export class RadioEngine {
 
     if (!m) {
       if (nxt) {
+        if (this.runVoiceIntro(nxt, f)) return;
         this.startTrack(nxt, f, this.nextFadeInSec);
       } else if (f - this.silentSince > secToFrames(FALLBACK_AFTER_SEC)) {
         this.startFallback(f);
@@ -1203,7 +1561,10 @@ export class RadioEngine {
         this.startBed(f, this.breakNow ? 1.5 : 2.5);
         this.breakState = "on";
         this.breakNow = false;
-        radioLog("⏸", c.boldYellow("PAUZA NA SLOVO") + c.yellow(" — hraje podkres"));
+        radioLog(
+          "⏸",
+          c.boldYellow("PAUZA NA SLOVO") + c.yellow(" — hraje podkres"),
+        );
         this.emitStatus(true);
       }
       return;
@@ -1212,6 +1573,35 @@ export class RadioEngine {
     if (!nxt) {
       // Nic připraveno (prázdná knihovna / chyba) — dohrát; pak záložní jingle.
       if (ended) this.retireMain(f, 0.05);
+      return;
+    }
+
+    // AI vstup přes konec dohrávající skladby (hudba se pod hlasem ztlumí, přechod proběhne pod ním).
+    const dj = this.djClip;
+    if (
+      dj?.outroSec &&
+      dj.forUuid === nxt.uuid &&
+      m.kind === "track" &&
+      !this.voiceClip &&
+      remaining <= secToFrames(dj.outroSec)
+    ) {
+      this.djClip = null;
+      if (this.canDjSpeak() && this.hasListeners())
+        void this.playVoiceNote(dj.id, this.djClipLabel ?? "AI moderátor");
+    }
+
+    // Další je přání s hlasovkou → skladba dohraje do ticha a další počká na hlasovku.
+    if (
+      (m.kind === "track" || m.filler) &&
+      !nxt.stinger &&
+      this.voiceIntroFor(nxt)
+    ) {
+      const fade = secToFrames(m.filler ? 1 : 3);
+      if (m.filler || remaining <= fade || ended)
+        this.retireMain(
+          f,
+          Math.max(0.05, Math.min(remaining, fade) / SAMPLE_RATE),
+        );
       return;
     }
 
@@ -1250,7 +1640,11 @@ export class RadioEngine {
     if (remaining <= overlap || ended) {
       const fadeFrames = secToFrames(plan.fadeOutSec);
       const fadeStart = Math.max(f, m.endFrame - fadeFrames);
-      this.fadeOut(m, fadeStart, Math.max(secToFrames(0.05), m.endFrame - fadeStart));
+      this.fadeOut(
+        m,
+        fadeStart,
+        Math.max(secToFrames(0.05), m.endFrame - fadeStart),
+      );
       this.transitionNote = `přechod ${Math.round(plan.overlapSec)} s`;
       this.startTrack(nxt, f, plan.fadeInSec);
     }
@@ -1288,19 +1682,28 @@ export class RadioEngine {
 
   /** Station ID místo ticha. Mixer pak hned naváže, jakmile je skladba připravená. */
   private startFallback(f: number): void {
+    void sendAlert(
+      "fallback",
+      "⚠️ Rádio nemá co hrát (prázdná fronta / chyba knihovny) — hraje záložní jingle nebo ticho.",
+    );
     if (!this.ffmpegPath || !this.fallbackPaths.length) {
       this.silentSince = f;
       return;
     }
     const file =
-      this.fallbackPaths[Math.floor(Math.random() * this.fallbackPaths.length)]!;
+      this.fallbackPaths[
+        Math.floor(Math.random() * this.fallbackPaths.length)
+      ]!;
     const deck = new PcmDeck(this.ffmpegPath, file).start();
     // Délku neznáme synchronně — konec určí dekodér (deck.ended).
     this.main = {
       ...this.stingerVoice({ path: file, durationSec: 3600, deck, gain: 1 }, f),
       filler: true,
     };
-    radioLog("⚠", c.yellow(`Není co hrát — záložní jingle ${path.basename(file)}`));
+    radioLog(
+      "⚠",
+      c.yellow(`Není co hrát — záložní jingle ${path.basename(file)}`),
+    );
     if (!this.preparing && !this.next) void this.prepareNext();
   }
 
@@ -1339,7 +1742,8 @@ export class RadioEngine {
   private onTrackStarted(item: PreparedTrack): void {
     if (this.history[0] !== item.uuid) {
       this.history.unshift(item.uuid);
-      if (this.history.length > HISTORY_LIMIT) this.history.length = HISTORY_LIMIT;
+      if (this.history.length > HISTORY_LIMIT)
+        this.history.length = HISTORY_LIMIT;
     }
     this.lastPlayedUuid = item.uuid;
     if (item.offsetSec === 0) {
@@ -1353,10 +1757,20 @@ export class RadioEngine {
     delete this.brokenInfo[item.uuid];
     {
       const tag =
-        item.source === "request" ? c.magenta(" PŘÁNÍ") : item.source === "rotation" ? "" : c.cyan(" ZAŘAZENO");
-      const details = [formatDuration(item.durationSec), this.transitionNote].filter(Boolean).join(" · ");
+        item.source === "request"
+          ? c.magenta(" PŘÁNÍ")
+          : item.source === "rotation"
+            ? ""
+            : c.cyan(" ZAŘAZENO");
+      const details = [formatDuration(item.durationSec), this.transitionNote]
+        .filter(Boolean)
+        .join(" · ");
       this.transitionNote = null;
-      radioLog(c.green("▶"), `${c.bold(item.meta.artist)} — ${item.meta.title}${tag}`, details);
+      radioLog(
+        c.green("▶"),
+        `${c.bold(item.meta.artist)} — ${item.meta.title}${tag}`,
+        details,
+      );
     }
 
     // Schválené přání → věnování, které moderátor přečte a posluchači uvidí.
@@ -1370,11 +1784,16 @@ export class RadioEngine {
         req.status = "played";
         req.playedAt = new Date().toISOString();
         // Bez moderátora pustí hlasovku samo rádio — chvilku po začátku skladby (po přechodu).
-        if (req.autoApproved && req.hasVoice) {
+        if (this.introHandled.has(req.id)) {
+          // Hlasovka i odpověď už zazněly před skladbou — teď jen hudba.
+          this.introHandled.delete(req.id);
+          voiceQueued = true;
+        } else if (req.autoApproved && req.hasVoice) {
           voiceQueued = true;
           const voiceId = req.id;
           setTimeout(() => {
-            if (this.started && this.main?.uuid === item.uuid) void this.playVoiceNote(voiceId);
+            if (this.started && this.main?.uuid === item.uuid)
+              void this.playVoiceNote(voiceId);
           }, 2500);
         }
         if (req.from || req.message || req.hasVoice) {
@@ -1407,6 +1826,8 @@ export class RadioEngine {
       this.emitStatus(true);
     });
 
+    if (item.meta.artist)
+      this.aiDj.recordPlay(item.meta.artist, item.meta.title);
     this.onTrackStartedDj(item, voiceQueued);
 
     void this.refillQueue()
@@ -1421,14 +1842,26 @@ export class RadioEngine {
     return !this.mic?.active && this.breakState === "none";
   }
 
+  /** Nikdo neposlouchá → AI moderátor mlčí (nic negeneruje ani nepouští, šetří kredity). */
+  private hasListeners(): boolean {
+    return this.listenerCount > 0;
+  }
+
   private onTrackStartedDj(item: PreparedTrack, voiceQueued: boolean): void {
+    const label = this.djClipLabel;
     const clip = this.djClip;
     this.djClip = null;
     // Vstup připravený pro tuhle skladbu → přes její začátek (po přechodu).
     if (clip && clip.forUuid === item.uuid && !voiceQueued) {
       setTimeout(() => {
-        if (this.started && this.main?.uuid === item.uuid && !this.voiceClip && this.canDjSpeak()) {
-          void this.playVoiceNote(clip.id, "AI moderátor");
+        if (
+          this.started &&
+          this.main?.uuid === item.uuid &&
+          !this.voiceClip &&
+          this.canDjSpeak() &&
+          this.hasListeners()
+        ) {
+          void this.playVoiceNote(clip.id, label ?? "AI moderátor");
         }
       }, 1500);
     }
@@ -1436,29 +1869,233 @@ export class RadioEngine {
     this.djTracks++;
     const s = this.aiDj.config;
     this.djGap ??= this.aiDj.nextGap();
-    if (!s.enabled || !this.aiDj.isConfigured() || this.djTracks < this.djGap) return;
+    // Předávka směny: na začátku první skladby po změně směny se moderátoři rozloučí / představí.
+    if (s.enabled && this.aiDj.isConfigured() && this.handleShiftChange(item))
+      return;
+    // Zprávy v celou: skladba začala chvíli před celou → vstup se zprávami k začátku té další.
+    const airAt = this.nextTrackStartsAt();
+    const clk = stationClock(airAt);
+    // Kolem celé: zazní mezi :56 a :07 (hodina = ta celá, ke které patří).
+    const nearHour = clk.minute >= 56 || clk.minute <= 7;
+    const hourOf = stationClock(new Date(airAt.getTime() + 10 * 60_000));
+    const hourKey = `${hourOf.date} ${hourOf.hour}`;
+    const everyH = Math.max(
+      1,
+      Number(process.env.AI_DJ_NEWS_EVERY_H ?? 3) || 3,
+    );
+    if (
+      s.enabled &&
+      s.news &&
+      nearHour &&
+      hourOf.hour % everyH === 0 &&
+      this.djHourlyKey !== hourKey &&
+      this.aiDj.isConfigured() &&
+      this.canDjSpeak() &&
+      !this.aiDj.isBusy &&
+      this.aiDj.budget().canSpeak &&
+      this.hasListeners() &&
+      this.aiDj.hostsAt(new Date(), this.djFallbackName()).length
+    ) {
+      this.djHourlyKey = hourKey;
+      this.resetDjGap();
+      void this.prepareDjFor(item, "hourly-news");
+      return;
+    }
+    // Denní shrnutí: jednou za den, vstup k první skladbě po AI_DJ_SUMMARY_HOUR (výchozí 20 h).
+    const sumHour = Number(process.env.AI_DJ_SUMMARY_HOUR ?? 20);
+    if (
+      s.enabled &&
+      Number.isFinite(sumHour) &&
+      clk.hour === sumHour &&
+      this.aiDj.summarySaidOn !== clk.date &&
+      this.aiDj.isConfigured() &&
+      this.canDjSpeak() &&
+      !this.aiDj.isBusy &&
+      this.aiDj.budget().canSpeak &&
+      this.hasListeners() &&
+      this.aiDj.hostsAt(airAt, this.djFallbackName()).length
+    ) {
+      this.aiDj.markSummary(clk.date);
+      this.resetDjGap();
+      void this.prepareDjFor(item, "daily-summary", {
+        summary: this.dailySummary(),
+      });
+      return;
+    }
+    if (!s.enabled || !this.aiDj.isConfigured()) return;
+    if (this.djTracks < this.djGap) {
+      // Rozestup ještě nedošel — přání posluchače ale AI uvede vždy (když mezi tím hrála aspoň jedna písnička bez slova).
+      if (this.djTracks >= 2) void this.maybeAnnounceRequest(item);
+      return;
+    }
     if (!this.canDjSpeak() || this.aiDj.isBusy) return;
-    if (s.onlyWithListeners && this.listenerCount === 0) return;
+    if (!this.hasListeners()) return;
     // Měsíční rozpočet znaků — když dnes nezbývá, mlčí (nespouští zbytečně model).
     if (!this.aiDj.budget().canSpeak) return;
-    this.djTracks = 0;
-    this.djGap = this.aiDj.nextGap();
+    // Nikdo nemá směnu → AutoDJ, nic se nechystá (rozestup se nepočítá znovu).
+    if (!this.aiDj.hostsAt(new Date(), this.djFallbackName()).length) return;
+    this.resetDjGap();
     void this.prepareDjFor(item);
   }
 
-  /** Počká na připravenou další skladbu a napíše + namluví vstup k jejímu začátku. */
-  private async prepareDjFor(current: PreparedTrack): Promise<void> {
+  /** Změnila se směna k začátku další skladby? → vstup s předávkou. Vrací true, když se vstup chystá. */
+  private handleShiftChange(item: PreparedTrack): boolean {
+    const fallback = this.djFallbackName();
+    // Směna platí ve chvíli, kdy vstup zazní — na začátku další skladby.
+    const at = this.nextTrackStartsAt();
+    const arrivingHosts = this.aiDj.hostsAt(at, fallback);
+    const names = arrivingHosts.map((h) => h.name);
+    const prev = this.aiDj.shiftNames();
+    if (prev === null) {
+      // Po startu rádia se nikdo znovu nepředstavuje (čas nástupu se vezme ze směny).
+      this.aiDj.setShiftNames(names, null);
+      return false;
+    }
+    const same =
+      prev.length === names.length && prev.every((n) => names.includes(n));
+    if (same) return false;
+    const leaving = prev.filter((n) => !names.includes(n));
+    const arriving = names.filter((n) => !prev.includes(n));
+    const staying = names.filter((n) => prev.includes(n));
+    const silently = () => {
+      this.shiftPendingSince = null;
+      this.aiDj.setShiftNames(names, at.getTime());
+      return false;
+    };
+    // Nikdo neposlouchá → směna se přepne potichu (nikdo pak netvrdí, že právě nastoupil).
+    if (!this.hasListeners()) return silently();
+    // Nejde mluvit teď → zkusí to u další skladby; po 20 minutách už jen potichu přepne
+    // (předávka o hodinu později by zněla divně).
+    if (
+      !this.canDjSpeak() ||
+      this.aiDj.isBusy ||
+      !this.aiDj.budget().canSpeak
+    ) {
+      this.shiftPendingSince ??= Date.now();
+      if (Date.now() - this.shiftPendingSince > 20 * 60_000) return silently();
+      return false;
+    }
+    this.shiftPendingSince = null;
+    this.aiDj.setShiftNames(names, at.getTime());
+    if (!leaving.length && !arriving.length) return false;
+    // Hlasy podle aktuálních nastavení (stejné jméno = stejný hlas).
+    const all = this.aiDj.config.hosts ?? [];
+    const voiceOf = (n: string) =>
+      all.find((h) => h.name === n && h.enabled !== false && h.voiceId)
+        ?.voiceId;
+    const leaver = leaving
+      .map((n) => ({ name: n, voiceId: voiceOf(n) ?? "" }))
+      .filter((h) => h.voiceId)
+      .slice(0, 1);
+    const newcomers = arrivingHosts.filter((h) => arriving.includes(h.name));
+    const stayer = arrivingHosts.find((h) => staying.includes(h.name));
+    // Kdo mluví (nejvýš dva):
+    //  - jen příchod k někomu, kdo už vysílá → ten ho přivítá, nový se představí,
+    //  - jen odchod, někdo zůstává → odcházející se rozloučí, kolega pokračuje,
+    //  - jinak odcházející předá příchozímu (kdo zůstává, se jen zmíní).
+    const speakers =
+      stayer && !leaving.length
+        ? [stayer, ...newcomers.slice(0, 1)]
+        : stayer && !arriving.length
+          ? [...leaver, stayer]
+          : leaver.length
+            ? [...leaver, ...newcomers.slice(0, 1)]
+            : newcomers.slice(0, 2);
+    if (!speakers.length) return false;
+    this.resetDjGap();
+    // Předávka kolem celé nahradí i zprávy v celou (dva vstupy za sebou by byly moc).
+    const hourOf = stationClock(new Date(at.getTime() + 10 * 60_000));
+    this.djHourlyKey = `${hourOf.date} ${hourOf.hour}`;
+    radioLog(
+      "🤖",
+      c.cyan(
+        `Předávka směny: ${leaving.join(", ") || "—"} → ${arriving.join(", ") || "jen hudba"}${staying.length ? ` (zůstává ${staying.join(", ")})` : ""} · mluví ${speakers.map((h) => h.name).join(" & ")}`,
+      ),
+    );
+    void this.prepareDjFor(item, "handover", {
+      hosts: speakers,
+      handover: { leaving, arriving, staying },
+    });
+    return true;
+  }
+
+  /**
+   * Každý vstup (běžný, předávka, zprávy v celou, přání) se počítá stejně:
+   * počítadlo od nuly a nový rozestup — další běžný vstup až po celé mezeře.
+   */
+  private genreBusy = false;
+
+  private resetDjGap(): void {
+    this.djTracks = 0;
+    this.djGap = this.djPlan.shift() ?? this.aiDj.nextGap();
+    // V noci mluví AI méně — rozestup o 2 skladby delší.
+    if (isNightHour(stationClock().hour)) this.djGap += 2;
+  }
+
+  /** Další skladba je přání posluchače → AI ho uvede mimo běžný rozestup. */
+  private async maybeAnnounceRequest(current: PreparedTrack): Promise<void> {
     for (let i = 0; i < 30 && !this.next && this.started; i++) {
       await new Promise((r) => setTimeout(r, 2000));
     }
     const next = this.next;
-    if (!next || !this.ffmpegPath) return;
+    if (
+      !next ||
+      next.source !== "request" ||
+      this.djClip ||
+      this.main?.uuid !== current.uuid
+    )
+      return;
+    const req = [...this.requestLog]
+      .reverse()
+      .find((r) => r.uuid === next.uuid && r.status === "approved");
+    // Přání s hlasovkou: pustí se hlasovka a AI pak odpoví na ni.
+    if (!req || req.hasVoice) return;
+    if (!this.canDjSpeak() || this.aiDj.isBusy || !this.aiDj.budget().canSpeak)
+      return;
+    if (!this.hasListeners()) return;
+    if (!this.aiDj.hostsAt(new Date(), this.djFallbackName()).length) return;
+    this.resetDjGap();
+    radioLog(
+      "🤖",
+      c.cyan(`AI uvede přání${req.from ? ` od ${req.from}` : ""}`),
+    );
+    await this.prepareDjFor(current, "request");
+  }
+
+  /** Počká na připravenou další skladbu a napíše + namluví vstup k jejímu začátku. */
+  private async prepareDjFor(
+    current: PreparedTrack,
+    focus?: AiDjFocus,
+    extra?: Partial<Pick<DjContext, "hosts" | "handover" | "summary">>,
+  ): Promise<void> {
+    for (let i = 0; i < 30 && !this.next && this.started; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    const next = this.next;
+    if (!next || !this.ffmpegPath || !this.hasListeners()) return;
     try {
-      const ctx = await this.buildDjContext(current.meta, next);
+      const ctx = {
+        ...(await this.buildDjContext(current.meta, next, focus)),
+        ...extra,
+      };
       const seg = await this.aiDj.createSegment(ctx, this.ffmpegPath);
       // Vstup patří jen k téhle skladbě — po skipu nebo změně fronty se nepustí.
-      this.djClip = { id: seg.id, forUuid: next.uuid };
-      radioLog("🤖", c.cyan(`AI vstup připraven (${ctx.focus})`), seg.text.slice(0, 90));
+      // Polovina krátkých vstupů začne už přes konec dohrávající skladby (zprávy ne — ty patří k celé).
+      const outro =
+        focus !== "hourly-news" &&
+        focus !== "handover" &&
+        seg.durationSec > 0 &&
+        seg.durationSec <= 14 &&
+        Math.random() < 0.5
+          ? Math.min(8, seg.durationSec * 0.6) + getCrossfadeSec() * 0.5
+          : undefined;
+      this.djClip = { id: seg.id, forUuid: next.uuid, outroSec: outro };
+      this.djClipLabel = seg.hosts.join(" & ") || null;
+      radioLog(
+        "🤖",
+        c.cyan(`AI vstup připraven (${ctx.focus})`),
+        seg.text.slice(0, 90),
+      );
     } catch (err) {
       console.warn("[ai-dj]", err instanceof Error ? err.message : err);
     }
@@ -1467,26 +2104,83 @@ export class RadioEngine {
   private async buildDjContext(
     justPlayed: RadioNowPlaying | null,
     next: PreparedTrack | null,
+    forceFocus?: AiDjFocus,
+    voiceReply?: { id?: string; from: string | null; text: string },
   ): Promise<DjContext> {
     const notes = (await listMessages().catch(() => []))
-      .filter((m) => m.text && !this.djUsedNotes.has(m.id) && Date.now() - Date.parse(m.createdAt) < 60 * 60_000)
+      .filter(
+        (m) =>
+          m.text &&
+          !this.djUsedNotes.has(m.id) &&
+          Date.now() - Date.parse(m.createdAt) < 60 * 60_000,
+      )
       .slice(0, 2);
     const s = this.aiDj.config;
-    const focus = pickFocus(this.djRound++, { news: s.news, weather: s.weather, hasNotes: notes.length > 0 });
+    const focus =
+      forceFocus ??
+      // Přání posluchače má vždy přednost — AI ho uvede a poděkuje.
+      (next?.source === "request" ? "request" : null) ??
+      pickFocus(this.djRound++, {
+        news: s.news,
+        weather: s.weather,
+        hasNotes: notes.length > 0,
+        quiz: !!next?.meta.year,
+      });
     if (focus === "listeners") notes.forEach((n) => this.djUsedNotes.add(n.id));
     const req =
       next?.source === "request"
-        ? [...this.requestLog].reverse().find((r) => r.uuid === next.uuid && r.status === "approved")
+        ? [...this.requestLog]
+            .reverse()
+            .find((r) => r.uuid === next.uuid && r.status === "approved")
         : undefined;
     return {
       stationName: getStationConfig().name,
-      hostName: process.env.AI_DJ_NAME?.trim() || this.moderator || "moderátor",
+      hosts: this.aiDj.pickHosts(this.djFallbackName()),
       focus,
-      justPlayed: justPlayed ? { artist: justPlayed.artist, title: justPlayed.title } : null,
-      next: next
-        ? { artist: next.meta.artist, title: next.meta.title, requestFrom: req?.from, requestMessage: req?.message }
+      justPlayed: justPlayed
+        ? {
+            artist: justPlayed.artist,
+            title: justPlayed.title,
+            album: justPlayed.album,
+            year: justPlayed.year,
+            genre: genreOf(justPlayed.uuid)?.genre ?? null,
+            energy: genreOf(justPlayed.uuid)?.energy ?? null,
+          }
         : null,
-      listenerNotes: focus === "listeners" ? notes.map((n) => ({ from: n.from, text: n.text })) : [],
+      next: next
+        ? {
+            artist: next.meta.artist,
+            title: next.meta.title,
+            album: next.meta.album,
+            year: next.meta.year,
+            genre: genreOf(next.uuid)?.genre ?? null,
+            energy: genreOf(next.uuid)?.energy ?? null,
+            requestFrom: req?.from,
+            requestMessage: req?.message,
+          }
+        : null,
+      listenerNotes:
+        focus === "listeners"
+          ? notes.map((n) => ({ id: n.id, from: n.from, text: n.text }))
+          : [],
+      recentHour: this.aiDj.plays
+        .filter((p) => Date.now() - p.at < 3600_000)
+        .reverse()
+        .map(({ artist, title }) => ({ artist, title })),
+      nextArtistToday: next ? this.artistPlaysToday(next.meta.artist) : 0,
+      stats: {
+        listeners: this.listenerCount,
+        nextPlaysRecent: next
+          ? this.history.filter((u) => u === next.uuid).length
+          : 0,
+      },
+      voiceReply: voiceReply ?? null,
+      upcoming: this.djUpcoming(next?.uuid ?? null),
+      // Vstup k další skladbě zazní až na jejím začátku; odpověď na hlasovku hned.
+      airAt: (next && !voiceReply
+        ? this.nextTrackStartsAt()
+        : new Date()
+      ).toISOString(),
     };
   }
 
@@ -1495,32 +2189,65 @@ export class RadioEngine {
   }
 
   async setAiDjSettings(input: unknown): Promise<AiDjState> {
+    const r = (input && typeof input === "object" ? input : {}) as {
+      rate?: { id?: unknown; value?: unknown };
+    };
+    if (r.rate) {
+      await this.aiDj.rate(r.rate.id, r.rate.value);
+      return this.aiDj.state();
+    }
     await this.aiDj.update(input);
     // Nový rozsah platí hned, ne až po dalším vstupu.
     this.djGap = null;
+    this.djPlan = [];
     return this.aiDj.state();
   }
 
-  /** Studio: vstup hned teď (přes právě hrající skladbu). */
   /**
-   * Studio: vstup hned teď. Odpoví hned a vstup se píše + namlouvá na pozadí
-   * (free modely umí trvat i minutu) — pustí se, jakmile je hotový.
+   * Studio: vstup na vyžádání. Píše se a namlouvá hned na pozadí, ale zazní až
+   * mezi písničkami — na začátku té další (ne přes rozehranou skladbu).
    */
   async aiDjNow(): Promise<{ ok: boolean; error?: string; pending?: boolean }> {
     const ffmpegPath = this.ffmpegPath;
     if (!ffmpegPath) return { ok: false, error: "Chybí ffmpeg." };
-    if (!this.canDjSpeak()) return { ok: false, error: "Teď mluví moderátor nebo je pauza." };
-    if (this.aiDj.isBusy) return { ok: false, error: "Vstup se už připravuje." };
-    if (!this.aiDj.isConfigured()) return { ok: false, error: "AI moderátor není nastavený." };
+    if (!this.canDjSpeak())
+      return { ok: false, error: "Teď mluví moderátor nebo je pauza." };
+    if (this.aiDj.isBusy)
+      return { ok: false, error: "Vstup se už připravuje." };
+    if (!this.aiDj.isConfigured())
+      return { ok: false, error: "AI moderátor není nastavený." };
+    if (!this.aiDj.hostsAt(new Date(), this.djFallbackName()).length) {
+      return {
+        ok: false,
+        error: "Teď nemá směnu žádný AI moderátor (studio → Moderátoři).",
+      };
+    }
+    if (this.djClip && this.djClip.forUuid === this.next?.uuid)
+      return { ok: false, error: "Vstup už je připravený na další písničku." };
+    // Vstup se připraví hned, ale zazní až mezi písničkami — na začátku té další.
+    this.resetDjGap();
     void (async () => {
       try {
-        const ctx = await this.buildDjContext(this.nowPlaying, this.next);
+        for (let i = 0; i < 30 && !this.next && this.started; i++)
+          await new Promise((r) => setTimeout(r, 2000));
+        const next = this.next;
+        if (!next) return;
+        const ctx = await this.buildDjContext(this.nowPlaying, next);
         const seg = await this.aiDj.createSegment(ctx, ffmpegPath, true);
-        if (!this.canDjSpeak()) {
-          radioLog("🤖", c.dim("AI vstup hotový, ale mezitím mluví moderátor — zahozen"));
+        if (this.next?.uuid !== next.uuid) {
+          radioLog(
+            "🤖",
+            c.dim("AI vstup hotový, ale písnička mezitím začala — zahozen"),
+          );
           return;
         }
-        await this.playVoiceNote(seg.id, "AI moderátor");
+        this.djClip = { id: seg.id, forUuid: next.uuid };
+        this.djClipLabel = seg.hosts.join(" & ") || null;
+        radioLog(
+          "🤖",
+          c.cyan("AI vstup ze studia připraven na další písničku"),
+          seg.text.slice(0, 90),
+        );
       } catch (err) {
         console.warn("[ai-dj]", err instanceof Error ? err.message : err);
       }
@@ -1545,12 +2272,17 @@ export class RadioEngine {
     return probed < Math.min(30, metaDuration * 0.25);
   }
 
-  private async getPlayableDuration(uuid: string, filepath: string): Promise<number> {
+  private async getPlayableDuration(
+    uuid: string,
+    filepath: string,
+  ): Promise<number> {
     const cached = this.durationCache.get(uuid);
     if (cached) return cached;
     let dur = 0;
     if (this.ffmpegPath) {
-      dur = await probePlayableDuration(filepath, this.ffmpegPath).catch(() => 0);
+      dur = await probePlayableDuration(filepath, this.ffmpegPath).catch(
+        () => 0,
+      );
     }
     if (dur <= 0) dur = (await probeDuration(filepath)) ?? 0;
     if (dur <= 0) {
@@ -1632,8 +2364,7 @@ export class RadioEngine {
     if (!stingerPath) return null;
     const analysis = await getMixAnalysis(this.ffmpegPath, stingerPath);
     // Bez koncového ticha — jinak by mezi jinglem a skladbou byla díra.
-    const dur =
-      analysis?.playEnd || ((await probeDuration(stingerPath)) ?? 0);
+    const dur = analysis?.playEnd || ((await probeDuration(stingerPath)) ?? 0);
     if (dur <= 0) return null;
     this.midsongDurationSec = dur;
     const deck = new PcmDeck(this.ffmpegPath, stingerPath).start();
@@ -1659,13 +2390,21 @@ export class RadioEngine {
     if (this.preparing) return this.preparing;
 
     this.preparing = (async () => {
-      for (let attempt = 0; attempt < 6 && this.started && !this.next; attempt++) {
+      for (
+        let attempt = 0;
+        attempt < 6 && this.started && !this.next;
+        attempt++
+      ) {
         if (!this.queue.length) await this.refillQueue();
         const candidate = this.takeNextCandidate();
         if (!candidate) break;
 
         this.preparingUuid = candidate.uuid;
-        const prepared = await this.prepareTrack(candidate.uuid, candidate.source, 0);
+        const prepared = await this.prepareTrack(
+          candidate.uuid,
+          candidate.source,
+          0,
+        );
         this.preparingUuid = null;
         if (!prepared) {
           this.broken.add(candidate.uuid);
@@ -1680,7 +2419,9 @@ export class RadioEngine {
         if (this.midsongConfig.paths.length) {
           this.midsongCountdown -= 1;
           if (this.midsongCountdown <= 0) {
-            this.midsongCountdown = randomMidsongInterval(this.midsongConfig);
+            this.midsongCountdown =
+              this.midsongPlan.shift() ??
+              randomMidsongInterval(this.midsongConfig);
             if (Math.random() <= this.midsongConfig.chance) {
               prepared.stinger = await this.prepareStinger();
             }
@@ -1705,7 +2446,8 @@ export class RadioEngine {
 
   private async refillQueue(): Promise<void> {
     const catalog = await getCatalog();
-    const current = this.main?.kind === "track" ? this.main.uuid : this.nowPlaying?.uuid;
+    const current =
+      this.main?.kind === "track" ? this.main.uuid : this.nowPlaying?.uuid;
     const nextId = this.next?.uuid ?? this.preparingUuid;
     const context = [
       ...[...this.requests].reverse(),
@@ -1739,7 +2481,9 @@ export class RadioEngine {
       requestLog: this.requestLog,
       moderator: this.moderator,
       tickerMessages: this.tickerMessages,
-    }).catch((err: unknown) => console.warn("[radio] Uložení stavu selhalo:", err));
+    }).catch((err: unknown) =>
+      console.warn("[radio] Uložení stavu selhalo:", err),
+    );
   }
 
   /** Vrátí nepoužitou připravenou skladbu zpět, odkud přišla. */
@@ -1762,11 +2506,20 @@ export class RadioEngine {
     const main = this.main;
     const playedSec = (this.frame - main.startFrame) / SAMPLE_RATE;
     // Přeskočení v první polovině = signál pro AutoDJ, ať ji dává méně.
-    if (dislike && main.kind === "track" && main.uuid && playedSec < main.durationSec * 0.5) {
+    if (
+      dislike &&
+      main.kind === "track" &&
+      main.uuid &&
+      playedSec < main.durationSec * 0.5
+    ) {
       const s = this.playStats[main.uuid];
       if (s) {
         s.skips = (s.skips ?? 0) + 1;
-        radioLog("⏭", c.dim(`Přeskočeno — AutoDJ ji bude dávat méně (${s.skips}×)`), main.meta?.title);
+        radioLog(
+          "⏭",
+          c.dim(`Přeskočeno — AutoDJ ji bude dávat méně (${s.skips}×)`),
+          main.meta?.title,
+        );
       }
     }
     this.retireMain(this.frame, SKIP_FADE_SEC);
@@ -1921,7 +2674,11 @@ export class RadioEngine {
   async getStudioQueue(): Promise<StudioQueueItem[]> {
     const catalog = await getCatalog();
     const items: StudioQueueItem[] = [];
-    const add = (id: string | null | undefined, source: QueueItemSource, stinger = false) => {
+    const add = (
+      id: string | null | undefined,
+      source: QueueItemSource,
+      stinger = false,
+    ) => {
       if (!id) return;
       const entry = catalog.get(id);
       if (!entry) return;
@@ -1931,10 +2688,215 @@ export class RadioEngine {
         ...(stinger ? { stingerBefore: true } : {}),
       });
     };
-    add(this.next?.uuid ?? this.preparingUuid, "prepared", Boolean(this.next?.stinger));
+    add(
+      this.next?.uuid ?? this.preparingUuid,
+      "prepared",
+      Boolean(this.next?.stinger),
+    );
     for (const id of this.requests) add(id, "request");
     for (const id of this.queue) add(id, "rotation");
+    this.annotateStudioQueue(items);
     return items;
+  }
+
+  /**
+   * Odhad do studiové fronty: kdy skladba začne, kde padne jingle a kde promluví
+   * AI moderátor (a kdo, podle směn). Stejná pravidla jako engine, jen dopředu.
+   */
+  /** Upoutávky: přání čekající ve frontě (za další skladbou) a nejbližší změna směny do hodiny. */
+  private djUpcoming(nextUuid: string | null): string[] {
+    const out: string[] = [];
+    const wished = this.requests
+      .filter((u) => u !== nextUuid)
+      .map((u) =>
+        [...this.requestLog]
+          .reverse()
+          .find((r) => r.uuid === u && r.status === "approved"),
+      )
+      .filter((r): r is NonNullable<typeof r> => !!r)
+      .slice(0, 2);
+    for (const r of wished)
+      out.push(
+        `za chvíli přání${r.from ? ` od ${r.from}` : ""}: ${r.artist} — ${r.title}`,
+      );
+    const fallback = this.djFallbackName();
+    const nowNames = this.aiDj
+      .hostsAt(new Date(), fallback)
+      .map((h) => h.name)
+      .sort()
+      .join("|");
+    for (let min = 10; min <= 60; min += 5) {
+      const at = new Date(Date.now() + min * 60_000);
+      const names = this.aiDj.hostsAt(at, fallback).map((h) => h.name);
+      if (names.slice().sort().join("|") !== nowNames) {
+        const c = stationClock(at);
+        const when = czechTime(c.hour, c.minute).replace(/^(Je|Jsou) /, "");
+        // Konec bez nástupce se neohlašuje (moderátor se rozloučí až při předávce).
+        if (names.length) out.push(`${when} přebírá ${names.join(" a ")}`);
+        break;
+      }
+    }
+    return out;
+  }
+
+  /** Statistiky dneška pro denní shrnutí. */
+  private dailySummary(): NonNullable<DjContext["summary"]> {
+    const today = stationClock().date;
+    const plays = this.aiDj.plays.filter(
+      (p) => stationClock(new Date(p.at)).date === today,
+    );
+    const byArtist = new Map<string, number>();
+    for (const p of plays) {
+      const a = p.artist.split(/,|&| feat\.?| ft\.?/i)[0]!.trim();
+      byArtist.set(a, (byArtist.get(a) ?? 0) + 1);
+    }
+    const topArtists = [...byArtist]
+      .sort((x, y) => y[1] - x[1])
+      .slice(0, 3)
+      .filter(([, n]) => n >= 2)
+      .map(([artist, count]) => ({ artist, count }));
+    const reqs = this.requestLog.filter(
+      (r) =>
+        (r.status === "played" || r.status === "approved") &&
+        stationClock(new Date(r.createdAt)).date === today,
+    );
+    const byName = new Map<string, number>();
+    for (const r of reqs)
+      if (r.from) byName.set(r.from, (byName.get(r.from) ?? 0) + 1);
+    const top = [...byName].sort((x, y) => y[1] - x[1])[0];
+    return {
+      tracks: plays.length,
+      topArtists,
+      requests: reqs.length,
+      topRequester: top && top[1] >= 2 ? { name: top[0], count: top[1] } : null,
+    };
+  }
+
+  /** Žánry do knihovny: po dávkách 40 skladeb, které ještě žánr nemají (AI podle interpreta a názvu). */
+  private async classifyGenresTick(): Promise<void> {
+    if (this.genreBusy || !this.aiDj.isConfigured()) return;
+    this.genreBusy = true;
+    try {
+      await loadGenres();
+      const missing = (await listTracks({ readyOnly: true }))
+        .filter((t) => !genreOf(t.uuid))
+        .slice(0, 40);
+      if (!missing.length) return;
+      const reply = await this.aiDj.classifyGenres(genrePrompt(missing));
+      const parsed = parseGenreReply(
+        reply.replace(/<think>[\s\S]*?<\/think>/g, ""),
+        missing.length,
+      );
+      const add: Record<string, GenreInfo> = {};
+      parsed.forEach((g, i) => {
+        if (g) add[missing[i]!.uuid] = g;
+      });
+      if (Object.keys(add).length) {
+        await saveGenres(add);
+        radioLog(
+          "🎼",
+          c.dim(`žánry doplněny: ${Object.keys(add).length} skladeb`),
+        );
+      }
+    } catch (err) {
+      console.warn("[genres]", err instanceof Error ? err.message : err);
+    } finally {
+      this.genreBusy = false;
+    }
+  }
+
+  /** Kolikrát dnes (pražský den) hrál interpret — porovnává hlavního interpreta (před „,“ / „feat“). */
+  private artistPlaysToday(artist: string): number {
+    const main = (a: string) =>
+      a
+        .toLowerCase()
+        .split(/,|&| feat\.?| ft\.?| x /)[0]!
+        .trim();
+    const key = main(artist);
+    const today = stationClock().date;
+    return this.aiDj.plays.filter(
+      (p) =>
+        main(p.artist) === key && stationClock(new Date(p.at)).date === today,
+    ).length;
+  }
+
+  /** Odhad, kdy začne další skladba (konec té současné minus přechod). */
+  private nextTrackStartsAt(): Date {
+    const now = Date.now();
+    const elapsed = this.trackStartedAt
+      ? (now - Date.parse(this.trackStartedAt)) / 1000
+      : 0;
+    const left = Math.max(
+      0,
+      (this.nowPlaying?.durationSec ?? 0) - elapsed - getCrossfadeSec(),
+    );
+    // + zpoždění streamu u posluchačů + vstup začíná ~1,5 s po startu skladby.
+    return new Date(now + (left + this.getListenerDelaySec() + 1.5) * 1000);
+  }
+
+  private annotateStudioQueue(items: StudioQueueItem[]): void {
+    const now = Date.now();
+    const fade = getCrossfadeSec();
+    const elapsed = this.trackStartedAt
+      ? (now - Date.parse(this.trackStartedAt)) / 1000
+      : 0;
+    const left = Math.max(0, (this.nowPlaying?.durationSec ?? 0) - elapsed);
+    let cursor = now + Math.max(0, left - fade) * 1000;
+
+    // Jingle: songsUntilMidsong = 1 → před další skladbou; další rozestupy z předem vylosovaného plánu.
+    const showStingers = this.midsongConfig.paths.length > 0;
+    let stingerCounter = this.songsUntilMidsong;
+    let stingerPlanAt = 0;
+    const nextStingerGap = () => {
+      while (this.midsongPlan.length <= stingerPlanAt)
+        this.midsongPlan.push(randomMidsongInterval(this.midsongConfig));
+      return this.midsongPlan[stingerPlanAt++]!;
+    };
+
+    // AI: vstup se chystá při startu skladby č. (gap − djTracks) a hraje přes tu následující.
+    const s = this.aiDj.config;
+    const aiOn = s.enabled && this.aiDj.isConfigured();
+    this.djGap ??= this.aiDj.nextGap();
+    let djPlanAt = 0;
+    const nextDjGap = () => {
+      while (this.djPlan.length <= djPlanAt)
+        this.djPlan.push(this.aiDj.nextGap());
+      return this.djPlan[djPlanAt++]!;
+    };
+    let aiIndex = -1;
+    if (aiOn) {
+      if (this.djClip && this.djClip.forUuid === items[0]?.uuid) aiIndex = 0;
+      else if (this.aiDj.isBusy) aiIndex = 0;
+      else aiIndex = Math.max(1, this.djGap - this.djTracks);
+    }
+
+    items.forEach((item, i) => {
+      // Stejně jako buildProgramSchedule; u připravené skladby (i = 0) platí skutečný stav.
+      if (showStingers && stingerCounter === 1) {
+        if (i > 0) item.stingerBefore = true;
+        // +1: hned níž se odečte za tuhle skladbu (engine odečítá až u další).
+        stingerCounter = nextStingerGap() + 1;
+      }
+      stingerCounter -= 1;
+      if (item.stingerBefore) cursor += this.midsongDurationSec * 1000;
+      item.startsAtMs = Math.round(cursor);
+      if (aiOn && i === aiIndex) {
+        const hosts = this.aiDj.hostsAt(
+          new Date(cursor),
+          this.djFallbackName(),
+        );
+        if (hosts.length) {
+          item.aiBefore = hosts.map((h) => h.name).join(" & ");
+          aiIndex += nextDjGap();
+        } else {
+          // Mimo směnu se nemluví — zkusí se u další skladby.
+          aiIndex += 1;
+        }
+      }
+      const dur =
+        item.durationSec && item.durationSec > 0 ? item.durationSec : 210;
+      cursor += Math.max(30, dur - fade) * 1000;
+    });
   }
 
   async getLibraryStats(): Promise<LibraryStats> {
@@ -1957,9 +2919,13 @@ export class RadioEngine {
             : null),
       };
     });
-    const totalPlays = Object.values(this.playStats).reduce((a, s) => a + s.plays, 0);
+    const totalPlays = Object.values(this.playStats).reduce(
+      (a, s) => a + s.plays,
+      0,
+    );
     const libraryHours =
-      tracks.reduce((a, t) => a + (t.playDuration ?? t.duration ?? 0), 0) / 3600;
+      tracks.reduce((a, t) => a + (t.playDuration ?? t.duration ?? 0), 0) /
+      3600;
     const groups = new Map<string, DuplicateTrack[]>();
     for (const t of tracks) {
       if (t.status !== "ready") continue;
@@ -2016,11 +2982,21 @@ export class RadioEngine {
     if (autoMs) {
       const autoCutoff = Date.now() - autoMs;
       for (const r of this.requestLog) {
-        if (r.status === "pending" && !this.autoApproving.has(r.id) && Date.parse(r.createdAt) < autoCutoff) {
+        if (
+          r.status === "pending" &&
+          !this.autoApproving.has(r.id) &&
+          Date.parse(r.createdAt) < autoCutoff
+        ) {
           this.autoApproving.add(r.id);
           void this.decideRequest(r.id, true, true)
             .then((res) => {
-              if (res.ok) radioLog("✔", c.cyan(`Přání schváleno automaticky: ${r.artist} — ${r.title}`));
+              if (res.ok)
+                radioLog(
+                  "✔",
+                  c.cyan(
+                    `Přání schváleno automaticky: ${r.artist} — ${r.title}`,
+                  ),
+                );
             })
             .finally(() => this.autoApproving.delete(r.id));
         }
@@ -2029,7 +3005,11 @@ export class RadioEngine {
     const cutoff = Date.now() - PENDING_REQUEST_TTL_MS;
     let changed = false;
     for (const r of this.requestLog) {
-      if (r.status === "pending" && !this.autoApproving.has(r.id) && Date.parse(r.createdAt) < cutoff) {
+      if (
+        r.status === "pending" &&
+        !this.autoApproving.has(r.id) &&
+        Date.parse(r.createdAt) < cutoff
+      ) {
         r.status = "expired";
         r.decidedAt = new Date().toISOString();
         changed = true;
@@ -2067,14 +3047,26 @@ export class RadioEngine {
     if (!entry) {
       return { ok: false, error: "Tuhle skladbu v knihovně nemáme." };
     }
-    if (this.pendingRequests.some((r) => r.uuid === uuid) || this.requests.includes(uuid)) {
-      return { ok: false, error: "Tuhle si už někdo přeje — počkej, až zazní." };
+    if (
+      this.pendingRequests.some((r) => r.uuid === uuid) ||
+      this.requests.includes(uuid)
+    ) {
+      return {
+        ok: false,
+        error: "Tuhle si už někdo přeje — počkej, až zazní.",
+      };
     }
     if (this.blockedForRequest().includes(uuid)) {
-      return { ok: false, error: "Tahle hrála nedávno nebo jde na řadu. Zkus jinou." };
+      return {
+        ok: false,
+        error: "Tahle hrála nedávno nebo jde na řadu. Zkus jinou.",
+      };
     }
     if (this.pendingRequests.length >= MAX_PENDING_REQUESTS) {
-      return { ok: false, error: "Moderátor má teď hodně přání ke schválení, zkus to za chvíli." };
+      return {
+        ok: false,
+        error: "Moderátor má teď hodně přání ke schválení, zkus to za chvíli.",
+      };
     }
 
     const fromRaw = cleanInput(input.from, 40);
@@ -2100,13 +3092,24 @@ export class RadioEngine {
 
     // Hlasovku nejde cenzurovat — o tom, jestli zazní, rozhoduje moderátor.
     if (input.voice) {
-      if (!this.ffmpegPath) return { ok: false, error: "Hlasovky teď nejdou zpracovat." };
+      if (!this.ffmpegPath)
+        return { ok: false, error: "Hlasovky teď nejdou zpracovat." };
       try {
-        const saved = await saveVoiceNote(request.id, input.voice, this.ffmpegPath);
+        const saved = await saveVoiceNote(
+          request.id,
+          input.voice,
+          this.ffmpegPath,
+        );
         request.hasVoice = true;
         request.voiceSec = Math.round(saved.durationSec);
       } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : "Hlasovku se nepodařilo uložit." };
+        return {
+          ok: false,
+          error:
+            err instanceof Error
+              ? err.message
+              : "Hlasovku se nepodařilo uložit.",
+        };
       }
     }
 
@@ -2117,20 +3120,63 @@ export class RadioEngine {
     radioLog(
       "✉",
       c.cyan(`Nové přání: ${entry.artist} — ${entry.title}`),
-      [request.from ? `od ${request.from}` : null, request.hasVoice ? "s hlasovkou" : null, request.message ? "se vzkazem" : null]
+      [
+        request.from ? `od ${request.from}` : null,
+        request.hasVoice ? "s hlasovkou" : null,
+        request.message ? "se vzkazem" : null,
+      ]
         .filter(Boolean)
         .join(" · "),
     );
 
-    if (!isRequestModerationEnabled()) {
-      const decided = await this.decideRequest(request.id, true);
-      if (!decided.ok) return decided;
+    // AI moderátor má kredity a směnu → přání se schválí hned samo
+    // (sprosté jméno / vzkaz / hlasovka čeká na člověka).
+    let transcript: string | null = null;
+    let autoOk = !request.flagged && this.aiCanTakeRequests();
+    if (autoOk && request.hasVoice) {
+      transcript = await this.aiDj
+        .transcribe(voiceNotePath(request.id) ?? "")
+        .catch(() => null);
+      autoOk = !!transcript && !censor(transcript).flagged;
+    }
+    if (!isRequestModerationEnabled() || autoOk) {
+      const decided = await this.decideRequest(request.id, true, autoOk);
+      if (!decided.ok) {
+        if (!autoOk) return decided;
+        // Automaticky to nešlo (plná fronta…) → necháme na moderátorovi.
+        void this.persistRotation();
+        this.emitStatus(true);
+      } else if (autoOk) {
+        radioLog(
+          "✔",
+          c.cyan(
+            `Přání schváleno automaticky (AI): ${entry.artist} — ${entry.title}`,
+          ),
+        );
+        this.prepareVoiceReply(request, transcript);
+      }
     } else {
       void this.persistRotation();
       this.emitStatus(true);
     }
     const view = this.requestView(request);
-    return { ok: true, id: request.id, status: view.status, position: view.position ?? undefined };
+    return {
+      ok: true,
+      id: request.id,
+      status: view.status,
+      position: view.position ?? undefined,
+    };
+  }
+
+  /** AI moderátor teď může přání přijmout sám (zapnutý, má směnu a kredity na dnešek). */
+  private aiCanTakeRequests(): boolean {
+    const s = this.aiDj.config;
+    return (
+      s.enabled &&
+      this.aiDj.isConfigured() &&
+      this.aiDj.budget().canSpeak &&
+      this.aiDj.hostsAt(new Date(), this.djFallbackName()).length > 0
+    );
   }
 
   /** Moderátor schválí / zamítne přání. */
@@ -2149,7 +3195,10 @@ export class RadioEngine {
     if (approve) {
       const blocked = this.blockedForRequest(request.id);
       if (blocked.includes(request.uuid)) {
-        return { ok: false, error: "Skladba mezitím hrála nebo už je ve frontě." };
+        return {
+          ok: false,
+          error: "Skladba mezitím hrála nebo už je ve frontě.",
+        };
       }
       if (this.requests.length >= getMaxRequestQueue()) {
         return { ok: false, error: "Fronta přání je plná." };
@@ -2183,14 +3232,22 @@ export class RadioEngine {
         if (idx >= 0) position = idx + 1 + (this.next ? 1 : 0);
       }
     }
-    return { id: r.id, status: r.status, title: r.title, artist: r.artist, position };
+    return {
+      id: r.id,
+      status: r.status,
+      title: r.title,
+      artist: r.artist,
+      position,
+    };
   }
 
   /** Stav přání pro posluchače (jen podle id, která zná). */
   getRequestStatuses(ids: string[]): RequestStatusView[] {
     this.expireRequests();
     const wanted = new Set(ids.slice(0, 20));
-    return this.requestLog.filter((r) => wanted.has(r.id)).map((r) => this.requestView(r));
+    return this.requestLog
+      .filter((r) => wanted.has(r.id))
+      .map((r) => this.requestView(r));
   }
 
   /** Pro studio: čekající přání (nejstarší první) + pár posledních rozhodnutých. */
@@ -2206,7 +3263,10 @@ export class RadioEngine {
       // (připravená další skladba už ve frontě requestů není → jde první).
       approved: this.requestLog
         .filter((r) => r.status === "approved")
-        .sort((a, b) => this.requests.indexOf(a.uuid) - this.requests.indexOf(b.uuid)),
+        .sort(
+          (a, b) =>
+            this.requests.indexOf(a.uuid) - this.requests.indexOf(b.uuid),
+        ),
       recent: this.requestLog
         .filter((r) => r.status !== "pending" && r.status !== "approved")
         .slice(0, 12),
@@ -2244,11 +3304,14 @@ export class RadioEngine {
         this.ffmpegPath,
         [
           "-y",
-          "-i", pathA,
-          "-i", pathB,
+          "-i",
+          pathA,
+          "-i",
+          pathB,
           "-filter_complex",
           buildTransitionPreviewFilterGraph(timing.startA, durA, durB, fadeSec),
-          "-t", String(timing.duration),
+          "-t",
+          String(timing.duration),
           ...mp3EncodeArgs("[aout]", outPath),
         ],
         { timeout: 180_000 },

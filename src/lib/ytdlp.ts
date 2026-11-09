@@ -187,6 +187,12 @@ function matchesTrack(
   const mainTitle = meta.title.split(/\s[-–]\s/)[0] ?? meta.title;
   const words = normalizeForMatch(mainTitle).split(" ").filter((w) => w.length >= 2);
   if (words.length && !words.every((w) => hay.includes(` ${w} `))) return false;
+  // Remix / jiná verze ze Spotify („- NobodyListen Remix“) musí být i v hitu — jinak by se stáhl originál.
+  const version = versionWords(meta.title);
+  if (version.length) {
+    const withUploader = `${hay}${normalizeLoose(hit.uploader)} `;
+    if (!version.every((w) => withUploader.includes(` ${w} `))) return false;
+  }
   if (!strict) return true;
 
   const artist = primaryArtist(meta.artist);
@@ -199,6 +205,33 @@ function matchesTrack(
     if (Math.abs(hit.duration - meta.duration) > tolerance) return false;
   }
   return true;
+}
+
+/** Slova, která dělají z písně jinou nahrávku — ta musí být i ve výsledku hledání. */
+const DISTINCT_VERSION =
+  /\b(remix|mix|rmx|bootleg|flip|rework|vip|edit|cover|live|acoustic|akusticky|sped up|slowed|extended|club|dub|version|verze)\b/;
+/** Obecná slova verze, která se jinak píšou různě — povinné jsou jen „remix“ apod. a jméno remixéra. */
+const LOOSE_VERSION_WORDS = new Set(["radio", "edit", "version", "verze", "original", "extended", "the", "feat", "ft", "with", "x"]);
+
+/**
+ * „Vítej mezi náma - NobodyListen Remix“ → ["nobodylisten", "remix"].
+ * Remaster, „Radio Edit“, „From …“ apod. povinné nejsou (originál se tak často jmenuje bez nich).
+ */
+function versionWords(title: string): string[] {
+  const parts = [
+    ...title.split(/\s[-–]\s/).slice(1),
+    ...[...title.matchAll(/[([]([^)\]]+)[)\]]/g)].map((m) => m[1]!),
+  ];
+  const out: string[] = [];
+  for (const part of parts) {
+    const p = normalizeLoose(part);
+    if (!DISTINCT_VERSION.test(p) || /\bremaster/.test(p)) continue;
+    if (/^(radio|single|album|clean|explicit)? ?(edit|version|verze)$|^radio mix$/.test(p)) continue;
+    for (const w of p.split(" ")) {
+      if (w.length >= 2 && !LOOSE_VERSION_WORDS.has(w) && !out.includes(w)) out.push(w);
+    }
+  }
+  return out;
 }
 
 /** Jiná než studiová verze — živák, cover, akustika, karaoke… */

@@ -64,6 +64,22 @@ export class ListenerStats {
     await rename(tmp, filePath());
   }
 
+  /**
+   * Jak velkou část hodiny dne (0–1) někdo poslouchal — průměr posluchačů za týden, max 1.
+   * null = za týden žádná data pro tuhle hodinu.
+   */
+  listenedShare(hour: number): number | null {
+    const weekAgo = stationClock(new Date(Date.now() - 7 * 86_400_000)).date;
+    let sum = 0;
+    let n = 0;
+    for (const [key, b] of Object.entries(this.buckets)) {
+      if (key.slice(0, 10) <= weekAgo || Number(key.slice(11, 13)) !== hour) continue;
+      sum += b.sum;
+      n += b.n;
+    }
+    return n ? Math.min(1, sum / n) : null;
+  }
+
   summary(): ListenerStatsSummary {
     const today = stationClock().date;
     const weekAgo = stationClock(new Date(Date.now() - 7 * 86_400_000)).date;

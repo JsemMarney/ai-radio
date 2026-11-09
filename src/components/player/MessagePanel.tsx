@@ -4,6 +4,19 @@ import { type FormEvent, useEffect, useState } from "react";
 import { type RecordedVoice, VoiceRecorder } from "@/components/player/VoiceRecorder";
 
 const FROM_KEY = "ai-radio-request-from";
+const SENT_KEY = "ai-radio-sent-messages";
+
+type Sent = { id: string; text: string; at: string };
+type Reply = { id: string; reply: { from: string; text: string; at: string } };
+
+function readSent(): Sent[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SENT_KEY) ?? "[]") as Sent[];
+    return Array.isArray(raw) ? raw.slice(0, 10) : [];
+  } catch {
+    return [];
+  }
+}
 const MAX = 300;
 
 /** Vzkaz do studia — pozdrav, dotaz nebo tip pro moderátora (bez přání písničky). */
@@ -13,6 +26,32 @@ export function MessagePanel() {
   const [voice, setVoice] = useState<RecordedVoice | null>(null);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [sent, setSent] = useState<Sent[]>([]);
+  const [replies, setReplies] = useState<Record<string, Reply["reply"]>>({});
+
+  // Odpovědi moderátora k mým vzkazům — kontrola každých 30 s.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      const mine = readSent();
+      if (alive) setSent(mine);
+      if (!mine.length) return;
+      try {
+        const res = await fetch(`/api/messages?ids=${mine.map((m) => m.id).join(",")}`, { cache: "no-store" });
+        const data = (await res.json()) as { replies?: Reply[] };
+        if (alive) setReplies(Object.fromEntries((data.replies ?? []).map((r) => [r.id, r.reply])));
+      } catch {
+        // stanice neodpovídá — zkusí se příště
+      }
+    };
+    const t = setTimeout(() => void poll(), 0);
+    const iv = setInterval(() => void poll(), 30_000);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+      clearInterval(iv);
+    };
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -36,8 +75,20 @@ export function MessagePanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ from, text, voice: voice?.base64 }),
       });
-      const data = (await res.json()) as { ok?: boolean; error?: string };
+      const data = (await res.json()) as { ok?: boolean; error?: string; id?: string };
       if (data.ok) {
+        if (data.id) {
+          const next = [
+            { id: data.id, text: text.trim() || "🎙 hlasovka", at: new Date().toISOString() },
+            ...readSent(),
+          ].slice(0, 10);
+          try {
+            localStorage.setItem(SENT_KEY, JSON.stringify(next));
+          } catch {
+            // storage nedostupný
+          }
+          setSent(next);
+        }
         setText("");
         setVoice(null);
         setFeedback({ ok: true, text: "Odesláno — moderátor to uvidí ve studiu." });
@@ -93,6 +144,20 @@ export function MessagePanel() {
         <p className={`mt-3 text-sm ${feedback.ok ? "text-[var(--ok)]" : "text-[var(--danger)]"}`} role="status">
           {feedback.text}
         </p>
+      ) : null}
+      {sent.some((m) => replies[m.id]) ? (
+        <ul className="mt-5 space-y-3" aria-label="Odpovědi moderátora">
+          {sent
+            .filter((m) => replies[m.id])
+            .map((m) => (
+              <li key={m.id} className="rounded-xl bg-[var(--bg-deep)]/60 p-3 text-sm">
+                <p className="text-xs text-[var(--ink-faint)]">Tvůj vzkaz: {m.text}</p>
+                <p className="mt-1 text-[var(--ink)]">
+                  <span className="font-semibold text-[var(--accent)]">{replies[m.id]!.from}:</span> {replies[m.id]!.text}
+                </p>
+              </li>
+            ))}
+        </ul>
       ) : null}
     </section>
   );

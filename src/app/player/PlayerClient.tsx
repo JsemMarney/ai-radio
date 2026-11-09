@@ -10,6 +10,8 @@ import {
   StationHeader,
   VolumeControl,
 } from "@/components/player/BroadcastUi";
+import { AudioVisualizer } from "@/components/player/AudioVisualizer";
+import { FavoriteAlert, FavoriteButton } from "@/components/player/Favorites";
 import { SongRequestPanel } from "@/components/player/SongRequestPanel";
 import { MessagePanel } from "@/components/player/MessagePanel";
 import { SuggestPanel } from "@/components/player/SuggestPanel";
@@ -86,17 +88,64 @@ export function PlayerClient({ station }: { station: StationConfig }) {
     micLive,
     moderator: moderatorName,
     moderatorOnAir,
+    aiHost,
     tickerMessages,
     segment,
+    visualizer,
+    setVisualizer,
   } = useRadio();
-  // Dlouho bez vstupu → posluchači vidí AutoDJ místo jména moderátora.
-  const moderator = micLive || moderatorOnAir ? moderatorName : null;
+  // Živý moderátor má přednost; jinak AI moderátor se směnou; jinak AutoDJ.
+  const moderator = micLive || moderatorOnAir ? moderatorName : aiHost;
   // Pauza na mluvené slovo — hraje jen podkres.
   const onBreak = segment === "talk";
   const [copied, setCopied] = useState(false);
 
   const onAir = broadcasting && stationOnline;
   const tint = useCoverTint(onBreak ? null : nowPlaying?.thumbnail);
+
+  // Zamčená obrazovka / ovládací centrum (Media Session): „písnička — autor“, pod tím rádio, obal skladby.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    const abs = (src: string) => new URL(src, window.location.href).href;
+    const cover = !onBreak && nowPlaying?.thumbnail ? abs(nowPlaying.thumbnail) : abs("/brand/logo.svg");
+    navigator.mediaSession.metadata = new MediaMetadata({
+      // Auto (CarPlay, Škoda…) i zamčená obrazovka: název = písnička, interpret = autor, album = rádio + moderátor.
+      title: onBreak || !nowPlaying ? station.name : nowPlaying.title,
+      artist: onBreak || !nowPlaying ? station.tagline : nowPlaying.artist,
+      album: moderator ? `${station.name} · ${moderator}` : station.name,
+      artwork: [
+        { src: cover, sizes: "512x512" },
+        { src: cover, sizes: "256x256" },
+      ],
+    });
+  }, [nowPlaying, onBreak, moderator, station.name, station.tagline]);
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+  }, [playing]);
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    const ms = navigator.mediaSession;
+    const set = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+      try {
+        ms.setActionHandler(action, handler);
+      } catch {
+        // prohlížeč akci nezná
+      }
+    };
+    set("play", () => {
+      if (!playing) toggle();
+    });
+    set("pause", () => {
+      if (playing) toggle();
+    });
+    // Živé vysílání — přetáčení o 10 s nedává smysl.
+    for (const a of ["seekbackward", "seekforward", "seekto", "previoustrack", "nexttrack"] as MediaSessionAction[]) {
+      set(a, null);
+    }
+  }, [playing, toggle]);
   const tuning = connection === "connecting" || connection === "reconnecting";
   const history = recentlyPlayed
     .filter((t) => t.uuid !== nowPlaying?.uuid)
@@ -135,6 +184,8 @@ export function PlayerClient({ station }: { station: StationConfig }) {
 
   return (
     <div className="ambient flex min-h-screen flex-col" style={{ "--tint": tint } as CSSProperties}>
+      <AudioVisualizer />
+      <FavoriteAlert track={onBreak ? null : nowPlaying} stationName={station.name} />
       <Ticker items={tickerItems} />
       <header className="sticky top-0 z-20 border-b border-[var(--line)] bg-[var(--bg-deep)]/60 backdrop-blur-xl">
         <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
@@ -146,7 +197,7 @@ export function PlayerClient({ station }: { station: StationConfig }) {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 space-y-6 px-4 py-6 sm:px-6 sm:py-8">
+      <main className="relative z-10 mx-auto w-full max-w-6xl flex-1 space-y-6 px-4 py-6 sm:px-6 sm:py-8">
         <section className="animate-fade-up">
           <NowPlaying
             track={onBreak ? null : nowPlaying}
@@ -176,11 +227,15 @@ export function PlayerClient({ station }: { station: StationConfig }) {
           >
             <div className="mt-7 flex flex-wrap items-center gap-x-6 gap-y-4">
               <ListenButton playing={playing} busy={playing && tuning} onToggle={toggle} />
-              <VolumeControl
-                volume={volume}
-                onChange={setVolume}
-                onToggleMute={() => setVolume(volume > 0 ? 0 : readLastVolume())}
-              />
+              {!onBreak ? <FavoriteButton track={nowPlaying} /> : null}
+              {/* Mobil a tablet (dotyk) mají hlasitost na tlačítkách — slider jen s myší. */}
+              <div className="[@media(pointer:coarse)]:hidden">
+                <VolumeControl
+                  volume={volume}
+                  onChange={setVolume}
+                  onToggleMute={() => setVolume(volume > 0 ? 0 : readLastVolume())}
+                />
+              </div>
             </div>
             {error ? (
               <p className="mt-4 text-sm text-[var(--danger)]" role="alert">
@@ -217,12 +272,20 @@ export function PlayerClient({ station }: { station: StationConfig }) {
         </div>
       </main>
 
-      <footer className="border-t border-[var(--line)]">
+      <footer className="relative z-10 border-t border-[var(--line)]">
         <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-[var(--ink-muted)] sm:px-6">
           <span>
             {station.name} · {station.tagline}
           </span>
           <div className="flex items-center gap-5">
+            <button
+              type="button"
+              onClick={() => setVisualizer(!visualizer)}
+              aria-pressed={visualizer}
+              className="transition-colors hover:text-[var(--ink)]"
+            >
+              Vizualizér: {visualizer ? "zap" : "vyp"}
+            </button>
             <button
               type="button"
               onClick={() => void copyShareUrl()}

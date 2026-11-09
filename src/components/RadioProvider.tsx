@@ -29,6 +29,7 @@ type StreamFormat = "mp3" | "aac";
 export type StreamQuality = "auto" | "high" | "low";
 
 const QUALITY_KEY = "ai-radio-quality";
+const VISUALIZER_KEY = "ai-radio-visualizer";
 
 /** Formát, který si přehrávač právě vybral (sdílí ho resolveStreamUrl). */
 let activeFormat: StreamFormat = "mp3";
@@ -135,6 +136,11 @@ type RadioContextValue = {
   setVolume: (value: number) => void;
   quality: StreamQuality;
   setQuality: (value: StreamQuality) => void;
+  /** Vizualizér pruhů na pozadí (zapnutý/vypnutý posluchačem). */
+  visualizer: boolean;
+  setVisualizer: (on: boolean) => void;
+  /** Analyzér zvuku pro vizualizér (null = nejde napojit → jen klidná animace). */
+  getAnalyser: () => AnalyserNode | null;
   /** Co se právě přehrává — např. "AAC 96 kbps". */
   streamLabel: string;
   aacAvailable: boolean;
@@ -149,6 +155,8 @@ type RadioContextValue = {
   moderator: string | null;
   /** Moderátor se nedávno ozval — jinak posluchači vidí AutoDJ. */
   moderatorOnAir: boolean;
+  /** AI moderátor(ři) se směnou — null = AutoDJ. */
+  aiHost: string | null;
   /** Vlastní texty do běžícího pruhu. */
   tickerMessages: string[];
   play: () => void;
@@ -186,6 +194,7 @@ type StatusPayload = {
   bedLevelDb?: number;
   moderator?: string | null;
   moderatorOnAir?: boolean;
+  aiHost?: string | null;
   tickerMessages?: string[];
 };
 
@@ -193,6 +202,86 @@ const CONNECTION_DEBOUNCE_MS = 800;
 
 export function RadioProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const graphRef = useRef<{ ctx: AudioContext; analyser: AnalyserNode; gain: GainNode } | null>(null);
+  /** Poslední hlasitost (0–1 gain) — po napojení analyzéru se přesune z <audio> do GainNode. */
+  const gainRef = useRef(1);
+  /**
+   * Hlasitost: bez analyzéru na <audio>, s analyzérem až za ním (GainNode) —
+   * vizualizér pak vidí plný signál a nereaguje na posuvník hlasitosti.
+   */
+  const applyGain = useCallback((gain: number) => {
+    gainRef.current = gain;
+    const el = audioRef.current;
+    const graph = graphRef.current;
+    if (graph) {
+      graph.gain.gain.value = gain;
+      if (el) el.volume = 1;
+    } else if (el) {
+      el.volume = gain;
+    }
+  }, []);
+  const [visualizer, setVisualizerState] = useState(true);
+  useEffect(() => {
+    // Až po hydrataci (server neví, co je v localStorage).
+    const t = setTimeout(() => {
+      try {
+        if (localStorage.getItem(VISUALIZER_KEY) === "0") setVisualizerState(false);
+      } catch {
+        // storage nedostupný
+      }
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+
+  /**
+   * Napojí <audio> na Web Audio analyzér — jen po kliknutí (jinak je AudioContext uspaný)
+   * a jen u streamu ze stejného originu (cizí bez CORS by zněl jako ticho).
+   * Na iOS ne — tam MediaElementSource u živého streamu umí ztlumit zvuk.
+   */
+  const ensureGraph = useCallback(() => {
+    const el = audioRef.current;
+    if (!el || typeof window === "undefined") return;
+    if (graphRef.current) {
+      void graphRef.current.ctx.resume().catch(() => {});
+      return;
+    }
+    const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AC) return;
+    if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) return;
+    try {
+      const src = el.currentSrc || el.src;
+      if (src && new URL(src, location.href).origin !== location.origin) return;
+      const ctx = new AC();
+      const source = ctx.createMediaElementSource(el);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.85;
+      source.connect(analyser);
+      const gain = ctx.createGain();
+      analyser.connect(gain);
+      gain.connect(ctx.destination);
+      graphRef.current = { ctx, analyser, gain };
+      applyGain(gainRef.current);
+      void ctx.resume().catch(() => {});
+    } catch {
+      // nejde napojit — vizualizér pojede jen naprázdno
+    }
+  }, [applyGain]);
+
+  const getAnalyser = useCallback(() => graphRef.current?.analyser ?? null, []);
+
+  const setVisualizer = useCallback(
+    (on: boolean) => {
+      setVisualizerState(on);
+      try {
+        localStorage.setItem(VISUALIZER_KEY, on ? "1" : "0");
+      } catch {
+        // storage nedostupný
+      }
+      if (on && audioRef.current && !audioRef.current.paused) ensureGraph();
+    },
+    [ensureGraph],
+  );
   const recentKeyRef = useRef("");
   const trackUuidRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -227,6 +316,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const [bedLevelDb, setBedLevelDb] = useState(-10);
   const [moderator, setModerator] = useState<string | null>(null);
   const [moderatorOnAir, setModeratorOnAir] = useState(false);
+  const [aiHost, setAiHost] = useState<string | null>(null);
   const [tickerMessages, setTickerMessages] = useState<string[]>([]);
   const [quality, setQualityState] = useState<StreamQuality>("auto");
   const [formats, setFormats] = useState<{ mp3: number; aac: number | null }>({
@@ -241,14 +331,14 @@ export function RadioProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(VOLUME_KEY, String(next));
     }
     if (audioRef.current) {
-      audioRef.current.volume = toGain(next);
+      applyGain(toGain(next));
     }
-  }, []);
+  }, [applyGain]);
 
   // Hlasitost z posuvníku platí vždy — i po načtení uložené hodnoty a před startem.
   useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = toGain(volume);
-  }, [volume]);
+    if (audioRef.current) applyGain(toGain(volume));
+  }, [volume, applyGain]);
 
   const applyStatus = useCallback((data: StatusPayload) => {
     if (data.sessionId !== undefined && data.sessionId !== sessionIdRef.current) {
@@ -318,6 +408,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     if (data.bedLevelDb !== undefined) setBedLevelDb(data.bedLevelDb);
     if (data.moderator !== undefined) setModerator(data.moderator);
     if (data.moderatorOnAir !== undefined) setModeratorOnAir(data.moderatorOnAir);
+    if (data.aiHost !== undefined) setAiHost(data.aiHost);
     if (data.tickerMessages !== undefined) setTickerMessages(data.tickerMessages);
     if (data.formats) {
       const f = data.formats;
@@ -521,15 +612,17 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     if (!el) return;
     // Start s ztlumeným posuvníkem by vypadal jako nefunkční rádio.
     if (volume < 0.05) setVolume(DEFAULT_VOLUME);
-    el.volume = toGain(volume < 0.05 ? DEFAULT_VOLUME : volume);
+    applyGain(toGain(volume < 0.05 ? DEFAULT_VOLUME : volume));
     void connectStream().then((ok) => {
       if (!ok) return;
+      if (visualizer) ensureGraph();
+      else void graphRef.current?.ctx.resume().catch(() => {});
       void el.play().catch(() => {
         setError("Přehrávání zablokováno prohlížečem. Klikni znovu.");
         setConnection("idle");
       });
     });
-  }, [connectStream, volume, setVolume]);
+  }, [connectStream, volume, setVolume, visualizer, ensureGraph, applyGain]);
 
   // Vybrat formát podle nastavení kvality a toho, co stanice umí.
   const wantsLight =
@@ -623,6 +716,9 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         setVolume,
         quality,
         setQuality,
+        visualizer,
+        setVisualizer,
+        getAnalyser,
         streamLabel,
         aacAvailable: formats.aac !== null,
         micLive,
@@ -632,6 +728,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         bedLevelDb,
         moderator,
         moderatorOnAir,
+        aiHost,
         tickerMessages,
         play,
         pause,

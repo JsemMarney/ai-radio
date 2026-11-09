@@ -23,6 +23,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const sinceArg = process.argv.indexOf("--since");
 const since = sinceArg > 0 ? Date.parse(process.argv[sinceArg + 1] ?? "") : NaN;
+// --only <soubor.json> = jen skladby s těmito UUID (např. ty, které na serveru chybí).
+const onlyArg = process.argv.indexOf("--only");
+const only = onlyArg > 0 ? new Set(JSON.parse(readFileSync(process.argv[onlyArg + 1], "utf8"))) : null;
 
 if (!existsSync(DOWNLOADS)) {
   console.error("✗ Složka downloads/ neexistuje — nejdřív něco naimportuj ve studiu.");
@@ -37,6 +40,7 @@ const tracks = [];
 let skipped = 0;
 for (const name of readdirSync(DOWNLOADS).sort()) {
   if (!UUID_RE.test(name)) continue;
+  if (only && !only.has(name)) continue;
   const dir = path.join(DOWNLOADS, name);
   const infoPath = path.join(dir, "info.json");
   if (!existsSync(infoPath)) continue;
