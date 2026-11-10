@@ -182,6 +182,8 @@ export type DjContext = {
     leaving: string[];
     arriving: string[];
     staying?: string[];
+    /** Čas směny, ke kterému předávka patří (když zazní pár minut před změnou). */
+    at?: string;
   } | null;
   /** Kdy vstup odhadem zazní (ISO) — podle něj se počítá čas, ne podle chvíle psaní. */
   airAt?: string;
@@ -247,14 +249,23 @@ const SING_CHANCE = 0.15;
 
 /** Nechá jen povolené tagy (nebo všechny vyhodí) a uklidí mezery. */
 function cleanTags(text: string, keep: boolean): string {
-  return text
-    .replace(/\[([^\]]{1,24})\]/g, (_, tag: string) =>
-      keep && EMOTION_TAGS.includes(tag.trim().toLowerCase())
-        ? `[${tag.trim().toLowerCase()}]`
-        : "",
-    )
-    .replace(/\s+/g, " ")
-    .trim();
+  return (
+    text
+      .replace(/\[([^\]]{1,24})\]/g, (_, tag: string) =>
+        keep && EMOTION_TAGS.includes(tag.trim().toLowerCase())
+          ? `[${tag.trim().toLowerCase()}]`
+          : "",
+      )
+      // Úřední fráze, které AI cpe do rozloučení — v rádiu zní špatně.
+      .replace(
+        /,?\s*(a )?(díky|děkuji|děkujeme) (vám )?za (vaši )?pozornost\b[,.!]?/giu,
+        "",
+      )
+      .replace(/\bna ?shledanou\b/giu, "mějte se")
+      .replace(/\s+([,.!?])/g, "$1")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
 }
 
 /** Jak vstup začít — náhodně, ať nezní pořád stejně („Právě dohrálo…“). */
@@ -566,6 +577,10 @@ const JUDGE_PROMPT =
 /** Fráze, které do éteru nechceme — když je AI napíše, vstup se vygeneruje znovu. */
 const BANNED: { label: string; re: RegExp }[] = [
   {
+    label: "úřední fráze („díky za pozornost“, „na shledanou“)",
+    re: /za (vaši )?pozornost|na ?shledanou/i,
+  },
+  {
     label: "čísla energie / stupnice z podkladů",
     re: /\b(z|ze) (jedničky|dvojky|trojky|čtyřky|pětky) na\b|energi\w*.{0,25}\b(jedničk|dvojk|trojk|čtyřk|pětk|[1-5] ?\/ ?5|na [1-5]\b)/i,
   },
@@ -714,10 +729,73 @@ export function untilWords(hhmm: string): string {
   return `do ${GEN[h12]} ${part}`;
 }
 
+/** Spočítaná fakta o směnách k předávce — AI je jen přeformuluje, nic si nedomýšlí. */
+export type HandoverFacts = {
+  /** Řádky pro prompt. */
+  lines: string[];
+  /** Odcházející, kteří se dnes ještě vrátí (neříkají „pro dnešek končím“). */
+  returnsLater: Record<string, string>;
+  /** Kdo bude po předávce sám — a do kdy („do tří odpoledne“). */
+  alone: { name: string; until: string | null } | null;
+  /** Do kdy budou po předávce spolu („do pěti odpoledne“). */
+  togetherUntil: string | null;
+  /** Jména z příští změny (smí zaznít „pak přijde Zdenda“). */
+  nextNames: string[];
+};
+
+/**
+ * Styly předávky — losuje se jeden, ať se loučení a příchody pořád neopakují.
+ * Nic z toho si nesmí vymýšlet fakta (zážitky, plány) — jen pocit a reakce.
+ */
+const HANDOVER_STYLES = [
+  "Odcházející zavzpomíná na jednu písničku ze své směny (jen z „Co hrálo“ v podkladech), která se mu líbila.",
+  "Odcházející poděkuje posluchačům za přání a vzkazy, krátce a vřele.",
+  "Hravě a s nadsázkou — kolegové se trochu popíchnou (bez urážek).",
+  "Úplně krátce a svižně, jako mezi kamarády — žádné dlouhé loučení.",
+  "Navaž na denní dobu (odpoledne, podvečer, večer) a co lidi asi zrovna dělají.",
+  "Kdo přichází, řekne, na co se ve své směně těší (obecně: hudba, přání posluchačů) — nic konkrétního si nevymýšlej.",
+];
+
+/** Čas jako „ve tři odpoledne“, „v poledne“ (pro „vrátím se …“). */
+export function atWords(hhmm: string): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm);
+  if (!m || Number(m[2])) return `v ${hhmm}`;
+  const h = Number(m[1]);
+  if (h === 0 || h === 24) return "o půlnoci";
+  if (h === 12) return "v poledne";
+  const ACC = [
+    "",
+    "v jednu",
+    "ve dvě",
+    "ve tři",
+    "ve čtyři",
+    "v pět",
+    "v šest",
+    "v sedm",
+    "v osm",
+    "v devět",
+    "v deset",
+    "v jedenáct",
+    "ve dvanáct",
+  ];
+  const part =
+    h < 5
+      ? "v noci"
+      : h < 9
+        ? "ráno"
+        : h < 12
+          ? "dopoledne"
+          : h < 18
+            ? "odpoledne"
+            : "večer";
+  return `${ACC[h % 12 || 12]} ${part}`;
+}
+
 function handoverBrief(
   h: { leaving: string[]; arriving: string[]; staying?: string[] },
   speaking: string[],
   until: (name: string) => string | null = () => null,
+  facts: HandoverFacts | null = null,
 ): string {
   const and = (xs: string[]) => xs.join(" a ");
   const leaving = h.leaving;
@@ -729,20 +807,25 @@ function handoverBrief(
   const silentStay = staying.filter((n) => !speaking.includes(n));
   const common = [
     "Předávka je krátká a lidská, ne jako hlášení.",
-    "Kdo přichází, řekne jednou, do kdy bude ve vysílání — přesně slovy z „Směna“ v podkladech (např. „do pěti odpoledne“), jiné časy nevymýšlej. Kdo odchází, řekne „pro dnešek končím“ (ne „končím do…“) a poděkuje posluchačům.",
+    "Kdo přichází, řekne jednou, do kdy bude ve vysílání — přesně slovy z faktů o směnách níže, jiné časy nevymýšlej. Kdo odchází, poděkuje posluchačům a řekne, že končí (podle faktů: „pro dnešek končím“, nebo „zatím končím, vrátím se …“ — nikdy „končím do…“).",
+    "Kdo zůstává ve vysílání, NEKONČÍ: neloučí se s posluchači, neříká „končím“ ani „díky za pozornost“.",
+    "Žádné úřední fráze („díky za pozornost“, „na shledanou“) — mluv jako v rádiu.",
+    "Nevymýšlej, jak dlouho nebo kdy jste dnes spolu vysílali („díky za společné dopoledne“) ani kdy se zase uvidíte — jen to, co je ve faktech. Směna do deseti večer není noční.",
+    "Loučení pokaždé jinými slovy: ne „Tak pro dnešek končím“, „To zní jako fajn tým“, „ať se daří“ ani „Měj se fajn“ — vymysli vlastní, přirozené obraty (např. „já se odpojuju“, „tímhle to za mě uzavírám“, „předávám mikrofon“, „užijte si večer“).",
     "Nikdo se nepředstavuje dvakrát a nikdo, kdo už vysílal, neříká, že nastupuje.",
-    "Kolegy oslovuj jen jejich jménem ve správném pádu (Zdendo, Martine, Josefe) — žádné přezdívky ani zdrobněliny.",
+    "Kolegy oslovuj jen jejich jménem ve správném pádu (Zdendo, Martine, Josefe) — žádné přezdívky ani zdrobněliny. Nikdo neoslovuje sám sebe: kdo mluví, oslovuje kolegu, ne svoje jméno.",
+    "Písničku na konci uvádí ten, kdo ve vysílání zůstává nebo přichází — ne ten, kdo odchází (ledaže už nikdo nezůstává).",
     "Na konci zazní uvedení další písničky.",
   ].join(" ");
   let plan: string;
   if (stayTalk.length && arriveTalk.length && !leaving.length) {
     const s = stayTalk[0]!;
     const a = and(arriveTalk);
-    plan = `${s} už moderuje a do studia teď přichází ${a}. Pořadí: 1) ${s} ho krátce přivítá jménem. 2) ${a} poděkuje, pozdraví posluchače a řekne, že od teď moderují spolu. Pak už jen krátká reakce a uvedení písničky.`;
+    plan = `${s} už moderuje a do studia teď přichází ${a}. Pořadí: 1) ${s} ho krátce přivítá jménem. 2) ${a} poděkuje, pozdraví posluchače a řekne, že od teď moderují spolu (do kdy spolu — jen podle faktů). ${s} nekončí a neloučí se. Pak už jen krátká reakce a uvedení písničky.`;
   } else if (stayTalk.length && leaveTalk.length && !arriving.length) {
     const s = stayTalk[0]!;
     const l = and(leaveTalk);
-    plan = `${l} končí směnu, ${s} zůstává ve vysílání. Pořadí: 1) ${l} řekne, že pro dnešek končí, poděkuje posluchačům a rozloučí se s ${s}. 2) ${s} mu poděkuje, rozloučí se a řekne, že teď pokračuje sám. Na konci ${s} uvede písničku.`;
+    plan = `${l} končí směnu, ${s} zůstává ve vysílání. Pořadí: 1) ${l} řekne, že končí, poděkuje posluchačům a rozloučí se s ${s}. 2) ${s} mu poděkuje, rozloučí se s ním a řekne, jak to bude dál (podle faktů — třeba „teď jsem tu sám do tří, pak přijde Martin“). Na konci ${s} uvede písničku.`;
   } else if (leaveTalk.length && arriveTalk.length) {
     const l = and(leaveTalk);
     const a = and(arriveTalk);
@@ -763,7 +846,11 @@ function handoverBrief(
   }
   if (leaving.length && !leaveTalk.length)
     plan += ` ${and(leaving)} už odešel — jen krátce poděkujte za jeho směnu.`;
-  return `${plan} ${common}`;
+  plan += ` Styl téhle předávky: ${HANDOVER_STYLES[Math.floor(Math.random() * HANDOVER_STYLES.length)]}`;
+  const factText = facts?.lines.length
+    ? ` Fakta o směnách (jediná správná — časy a kdo končí ber jen odsud): ${facts.lines.join(" ")}`
+    : "";
+  return `${plan}${factText} ${common}`;
 }
 
 /** Levenshteinova vzdálenost (krátká slova — zkomolená jména). */
@@ -1300,7 +1387,16 @@ export class AiDj {
         memory?: Partial<AiDj["memory"]>;
         log?: AiDjLogEntry[];
       };
-      if (Array.isArray(saved.log)) this.log = saved.log.slice(-100);
+      if (Array.isArray(saved.log)) {
+        // Jedinečná id (staré/testovací záznamy mohly mít stejné) — jinak se plete studio.
+        const seen = new Set<string>();
+        this.log = saved.log.slice(-100).map((e) => {
+          const id =
+            typeof e.id === "string" && !seen.has(e.id) ? e.id : randomUUID();
+          seen.add(id);
+          return id === e.id ? e : { ...e, id };
+        });
+      }
       this.settings = { ...DEFAULTS, ...saved.settings };
       if (saved.chars) this.chars = saved.chars;
       if (saved.memory) this.memory = { ...this.memory, ...saved.memory };
@@ -1700,6 +1796,217 @@ export class AiDj {
     return [...all].sort((p, q) => ago(p) - ago(q))[0];
   }
 
+  /**
+   * Změní se obsazení směn do `minutes` minut po `at`? Pak se běžný vstup
+   * (i zprávy) vynechá — za chvíli stejně mluví předávka.
+   */
+  shiftChangeWithin(at: Date, minutes: number): boolean {
+    const now = this.namesOnAir(at).join("|");
+    const step = 5 * 60_000;
+    const until = at.getTime() + minutes * 60_000;
+    for (
+      let t = Math.ceil((at.getTime() + 1) / step) * step;
+      t <= until;
+      t += step
+    )
+      if (this.namesOnAir(new Date(t)).join("|") !== now) return true;
+    return false;
+  }
+
+  /** Texty posledních předávek (bez tagů) — ať se neopakují. */
+  private recentHandoverTexts(): string[] {
+    return this.log
+      .filter((e) => e.focus === "handover")
+      .slice(-4)
+      .map((e) => cleanTags(e.text, false));
+  }
+
+  /** První změna obsazení směn mezi `from` a `to` (po 5 minutách), jinak null. */
+  shiftChangeBetween(from: Date, to: Date): Date | null {
+    const now = this.namesOnAir(from).join("|");
+    const step = 5 * 60_000;
+    for (
+      let t = Math.ceil((from.getTime() + 1) / step) * step;
+      t <= to.getTime();
+      t += step
+    )
+      if (this.namesOnAir(new Date(t)).join("|") !== now) return new Date(t);
+    return null;
+  }
+
+  /** Jména moderátorů se směnou v čase `at` (bez losování dvojice). */
+  private namesOnAir(at: Date): string[] {
+    return [
+      ...new Set(
+        (this.settings.hosts ?? [])
+          .filter((h) => isHostOnShift(h, at))
+          .map((h) => h.name),
+      ),
+    ].sort();
+  }
+
+  /** Nejbližší změna obsazení po `at` (po 5 minutách, nejvýš do konce dne). */
+  private nextShiftChange(at: Date): { hhmm: string; names: string[] } | null {
+    const now = this.namesOnAir(at).join("|");
+    const step = 5 * 60_000;
+    let t = Math.ceil((at.getTime() + 60_000) / step) * step;
+    const startDay = stationClock(at).date;
+    for (let i = 0; i < 24 * 12; i++, t += step) {
+      const d = new Date(t);
+      const clk = stationClock(d);
+      const names = this.namesOnAir(d);
+      if (names.join("|") !== now) {
+        const hhmm = `${String(clk.hour).padStart(2, "0")}:${String(clk.minute).padStart(2, "0")}`;
+        return { hhmm: clk.date === startDay ? hhmm : "00:00", names };
+      }
+      if (clk.date !== startDay) return null;
+    }
+    return null;
+  }
+
+  /** Vysílal už dnes dřív (před poslední pauzou)? */
+  private wasOnAirToday(name: string, at: Date): boolean {
+    const step = 5 * 60_000;
+    const day = stationClock(at).date;
+    for (let t = Math.floor(at.getTime() / step) * step - step; ; t -= step) {
+      const d = new Date(t);
+      if (stationClock(d).date !== day) return false;
+      if (this.namesOnAir(d).includes(name)) return true;
+    }
+  }
+
+  /** Vrátí se odcházející ještě dnes? → „od tří odpoledne“. */
+  private returnsToday(name: string, at: Date): string | null {
+    const step = 5 * 60_000;
+    const day = stationClock(at).date;
+    let wasOff = false;
+    for (
+      let t = Math.ceil((at.getTime() + 60_000) / step) * step;
+      ;
+      t += step
+    ) {
+      const d = new Date(t);
+      const clk = stationClock(d);
+      if (clk.date !== day) return null;
+      const on = this.namesOnAir(d).includes(name);
+      if (!on) wasOff = true;
+      else if (wasOff) {
+        const hhmm = `${String(clk.hour).padStart(2, "0")}:${String(clk.minute).padStart(2, "0")}`;
+        return atWords(hhmm);
+      }
+    }
+  }
+
+  /** Fakta k předávce: kdo končí (a zda se vrátí), kdo zůstává, do kdy spolu / sám, kdo přijde pak. */
+  handoverFacts(
+    h: { leaving: string[]; arriving: string[]; staying?: string[] },
+    at: Date,
+  ): HandoverFacts {
+    const lines: string[] = [];
+    const returnsLater: Record<string, string> = {};
+    for (const n of h.leaving) {
+      const back = this.returnsToday(n, at);
+      if (back) {
+        returnsLater[n] = back;
+        lines.push(
+          `${n} teď odchází, ale dnes se ještě vrátí — řekne přesně „zatím končím, vrátím se ${back}“, NE „pro dnešek končím“.`,
+        );
+      } else lines.push(`${n} teď pro dnešek končí.`);
+    }
+    for (const n of h.arriving) {
+      const cfg = this.shiftOf(n, at);
+      const u = cfg && cfg.from !== cfg.to ? untilWords(cfg.to) : null;
+      const earlier = this.wasOnAirToday(n, at);
+      lines.push(
+        `${n} ${earlier ? "se vrací (dnes už vysílal dřív — nepředstavuje se znovu, jen řekne, že je zpátky)" : "přichází"}${u ? `, jeho směna trvá ${u}` : ""}.`,
+      );
+    }
+    for (const n of h.staying ?? []) {
+      const cfg = this.shiftOf(n, at);
+      const u = cfg && cfg.from !== cfg.to ? untilWords(cfg.to) : null;
+      lines.push(
+        `${n} zůstává ve vysílání — teď NEKONČÍ${u ? ` (jeho směna trvá ${u}, to teď neříká)` : ""}.`,
+      );
+    }
+    const present = this.namesOnAir(at);
+    const next = this.nextShiftChange(at);
+    const nextWhen = next ? untilWords(next.hhmm) : null;
+    let nextDesc = "";
+    if (next) {
+      const come = next.names.filter((n) => !present.includes(n));
+      const go = present.filter((n) => !next.names.includes(n));
+      nextDesc = !next.names.length
+        ? "už hraje jen hudba"
+        : [
+            go.length ? `${go.join(" a ")} skončí` : "",
+            come.length ? `přijde ${come.join(" a ")}` : "",
+          ]
+            .filter(Boolean)
+            .join(" a ");
+    }
+    let alone: HandoverFacts["alone"] = null;
+    let togetherUntil: string | null = null;
+    if (present.length === 1) {
+      alone = { name: present[0]!, until: nextWhen };
+      lines.push(
+        nextWhen
+          ? `Po předávce je ve vysílání sám ${present[0]}, ale jen ${nextWhen} — řekne třeba „teď jsem tu sám ${nextWhen}, pak ${nextDesc}“.`
+          : `Po předávce je ve vysílání sám ${present[0]}.`,
+      );
+    } else if (present.length > 1) {
+      togetherUntil = nextWhen;
+      lines.push(
+        `Po předávce moderují spolu ${present.join(" a ")}${nextWhen ? ` — spolu jen ${nextWhen}, pak ${nextDesc}. Kdo řekne, do kdy budou spolu (nebo „budu tu s …“), řekne ${nextWhen} — ne konec vlastní směny` : ""}.`,
+      );
+    }
+    return {
+      lines,
+      returnsLater,
+      alone,
+      togetherUntil,
+      nextNames: next ? next.names.filter((n) => !present.includes(n)) : [],
+    };
+  }
+
+  /**
+   * Dnešní rozvrh pro prompt — všichni moderátoři s časy a nejbližší změna,
+   * ať moderátoři o kolezích a časech mluví podle skutečnosti.
+   */
+  scheduleInfo(at: Date): string | null {
+    const clock = stationClock(at);
+    const short = (hhmm: string) => {
+      const [h, m] = hhmm.split(":").map(Number);
+      return m ? `${h}:${String(m).padStart(2, "0")}` : String(h);
+    };
+    const today = (this.settings.hosts ?? [])
+      .filter(
+        (h) =>
+          h.enabled !== false &&
+          h.name &&
+          h.voiceId &&
+          h.days.includes(clock.weekday),
+      )
+      .sort((a, b) => minutesOf(a.from) - minutesOf(b.from))
+      .map((h) =>
+        h.from === h.to
+          ? `${h.name} celý den`
+          : `${h.name} ${short(h.from)}–${short(h.to)}`,
+      );
+    if (!today.length) return null;
+    const present = this.namesOnAir(at);
+    const next = this.nextShiftChange(at);
+    let change = "";
+    if (next) {
+      const come = next.names.filter((n) => !present.includes(n));
+      const go = present.filter((n) => !next.names.includes(n));
+      const when = atWords(next.hhmm);
+      change = !next.names.length
+        ? ` Nejbližší změna: ${when} končí moderování, pak hraje jen hudba.`
+        : ` Nejbližší změna: ${when}${go.length ? ` skončí ${go.join(" a ")}` : ""}${go.length && come.length ? " a" : ""}${come.length ? ` přijde ${come.join(" a ")}` : ""}.`;
+    }
+    return `Rozvrh moderátorů dnes: ${today.join(", ")}.${change} O kolezích a časech směn mluv jen podle tohoto rozvrhu (a jen když se to hodí) — nic jiného si nevymýšlej.`;
+  }
+
   /** Popis směn pro prompt: kdo odkdy moderuje a dokdy. */
   private shiftInfo(hosts: ActiveHost[], at: Date): string | null {
     const since = this.memory.shift?.since ?? {};
@@ -2025,6 +2332,7 @@ export class AiDj {
     const rated = this.log.filter((e) => e.rating);
     const liked = rated.filter((e) => e.rating === 1).slice(-3);
     const disliked = rated.filter((e) => e.rating === -1).slice(-2);
+    const recentHandovers = this.recentHandoverTexts();
     const hhmm = (ms: number) => {
       const c = stationClock(new Date(ms));
       return `${c.hour}:${String(c.minute).padStart(2, "0")}`;
@@ -2050,8 +2358,11 @@ export class AiDj {
         : `Rádio: ${ctx.stationName}. Moderátor: ${a!.name}.`,
       this.shiftInfo(
         ctx.hosts,
-        clock ? new Date(ctx.airAt ?? Date.now()) : new Date(),
+        clock
+          ? new Date(ctx.handover?.at ?? ctx.airAt ?? Date.now())
+          : new Date(),
       ),
+      this.scheduleInfo(new Date(ctx.handover?.at ?? ctx.airAt ?? Date.now())),
       ctx.focus === "handover"
         ? null
         : "Uprostřed směny: nepředstavuj se, nezdrav jako na začátku a neříkej, že jsi právě nastoupil, přebíráš nebo končíš — to se říká jen při předávce směny.",
@@ -2109,14 +2420,18 @@ export class AiDj {
                 (n) => {
                   const cfg = this.shiftOf(
                     n,
-                    new Date(ctx.airAt ?? Date.now()),
+                    new Date(ctx.handover?.at ?? ctx.airAt ?? Date.now()),
                   );
                   return cfg && cfg.from !== cfg.to ? untilWords(cfg.to) : null;
                 },
+                this.handoverFacts(
+                  ctx.handover,
+                  new Date(ctx.handover?.at ?? ctx.airAt ?? Date.now()),
+                ),
               )
             : "předávka směny",
           "daily-summary":
-            "denní shrnutí — krátce a vesele shrň dnešek v rádiu podle statistik v podkladech (kdo hrál nejvíc, kolik přání, kdo si přál nejvíc), poděkuj posluchačům. Jen čísla z podkladů",
+            "denní shrnutí — krátce a vesele shrň dnešek v rádiu podle statistik v podkladech: nejvýš 3 čísla (třeba kolik písniček hrálo, kdo hrál nejčastěji a kolik přání přišlo), každé v jednoduché větě („Nejčastěji hrál Scooter, devětkrát.“), žádné výčty. Poděkuj posluchačům a uveď písničku. Nejvýš 4 krátké věty, jen čísla z podkladů",
           request:
             "přání posluchače — písnička, která začíná, je přání (jméno a vzkaz jsou v podkladech u „Teď začíná“). Poděkuj tomu, kdo si ji přál, jménem (bez jména řekni „jeden z vás“). Když je vzkaz slušný, krátce na něj zareaguj nebo ho převyprávěj vlastními slovy, klidně oceň volbu písničky. Na konci písničku uveď",
           "voice-reply":
@@ -2174,6 +2489,9 @@ export class AiDj {
               ? `; ${ctx.next.title} hrála poslední dobou už ${ctx.stats.nextPlaysRecent}×`
               : ""
           }.`
+        : null,
+      ctx.focus === "handover" && recentHandovers.length
+        ? `Takhle zněly poslední předávky — NEOPAKUJ z nich obraty ani stavbu, napiš to jinak:\n${recentHandovers.map((t) => `- ${t}`).join("\n")}`
         : null,
       liked.length
         ? `Vstupy, které se líbily (vzor stylu, obsah neopakuj):\n${liked.map((e) => `- ${cleanTags(e.text, false)}`).join("\n")}`
@@ -2298,6 +2616,18 @@ export class AiDj {
       }
       const eng = plain.match(ENGLISH_FILLER);
       if (eng) hits.push(`anglické slovo „${eng[0]}“`);
+      // Moc dlouhé by se při namlouvání zkrátilo a přišlo o uvedení písničky.
+      const limit = dialog ? 300 : ctx.focus === "daily-summary" ? 480 : 360;
+      const longest = dialog
+        ? Math.max(
+            0,
+            ...text
+              .split(/\n+/)
+              .map((l) => l.replace(/^[^:]{1,30}:\s*/, "").length),
+          )
+        : text.replace(/\[[^\]]{1,24}\]/g, "").length;
+      if (longest > limit)
+        hits.push(`moc dlouhé (${longest} znaků, max ${limit}) — zkrať`);
       if (
         ctx.focus !== "handover" &&
         /nastupuj|nastoupil|přebírám|přebírá|začínám (svou |mou )?směnu|končím směnu|loučím se|předávám/i.test(
@@ -2313,6 +2643,121 @@ export class AiDj {
           )
         )
           hits.push("„končím do …“ — má být „pro dnešek končím“");
+        const facts = this.handoverFacts(
+          ctx.handover,
+          new Date(ctx.handover?.at ?? ctx.airAt ?? Date.now()),
+        );
+        const staying = ctx.handover.staying ?? [];
+        for (const raw of text.split(/\n+/)) {
+          const m = /^\s*([^:\n]{2,24}):\s*(.*)$/.exec(raw);
+          const who = m?.[1]?.trim();
+          const said = m?.[2] ?? "";
+          if (!who) continue;
+          if (
+            staying.includes(who) &&
+            /\b(končím|odcházím|loučím se s vámi)\b|díky za pozornost|pro dnešek/i.test(
+              said,
+            )
+          )
+            hits.push(`${who} zůstává ve vysílání, ale říká, že končí`);
+          const own = fold(who).slice(0, Math.max(3, who.length - 1));
+          if (own.length >= 4 && fold(said).includes(own))
+            hits.push(`${who} oslovuje sám sebe`);
+          if (facts.returnsLater[who] && /pro dnešek/i.test(said))
+            hits.push(`${who} se dnes ještě vrací — ne „pro dnešek končím“`);
+        }
+        const word = (w: string | null) =>
+          w?.replace(/^do /, "").split(" ")[0] ?? "";
+        const aloneM = /\bsám do (\p{L}+)/iu.exec(text);
+        if (
+          aloneM &&
+          (!facts.alone || fold(aloneM[1]!) !== fold(word(facts.alone.until)))
+        )
+          hits.push(
+            facts.alone?.until
+              ? `„sám do ${aloneM[1]}“ — sám bude jen ${facts.alone.until}`
+              : `„sám do ${aloneM[1]}“ — podle směn to nesedí`,
+          );
+        // „budu tu se Zdendou do pěti“ — spolu jen do konce společné části.
+        for (const sentence of text.split(/[.!?\n]+/)) {
+          const f = fold(sentence);
+          const mentions = staying.some((n) =>
+            f.includes(fold(n).slice(0, Math.max(3, n.length - 1))),
+          );
+          const tm =
+            /\bdo (\p{L}+) (rano|dopoledne|odpoledne|vecer|v noci)\b|\bdo (poledne|pulnoci)\b/u.exec(
+              f,
+            );
+          if (mentions && tm && facts.togetherUntil) {
+            const got = tm[1] ?? tm[3]!;
+            if (got !== fold(word(facts.togetherUntil)))
+              hits.push(
+                `s kolegou bude jen ${facts.togetherUntil}, ne „do ${got}“`,
+              );
+          }
+        }
+        const togM = /\bspolu do (\p{L}+)/iu.exec(text);
+        if (togM && fold(togM[1]!) !== fold(word(facts.togetherUntil)))
+          hits.push(
+            facts.togetherUntil
+              ? `„spolu do ${togM[1]}“ — spolu budou jen ${facts.togetherUntil}`
+              : `„spolu do ${togM[1]}“ — podle směn to nesedí`,
+          );
+        // Stejné obraty jako minule („pro dnešek končím, díky…“, „fajn tým“) → jinak.
+        {
+          // Jména v jakémkoli pádu (Martinem, Josefe) se nepočítají.
+          const stems = [
+            ...staying,
+            ...ctx.handover.leaving,
+            ...ctx.handover.arriving,
+          ]
+            .map((x) => fold(x).slice(0, Math.max(3, x.length - 1)))
+            .filter((x) => x.length >= 3);
+          const grams = (t: string, skip: Set<string>) => {
+            const w = fold(t).match(/\p{L}+/gu) ?? [];
+            const out = new Set<string>();
+            for (let i = 0; i + 3 < w.length; i++) {
+              const g = w.slice(i, i + 4);
+              if (
+                g.some(
+                  (x) => skip.has(x) || stems.some((st) => x.startsWith(st)),
+                )
+              )
+                continue;
+              out.add(g.join(" "));
+            }
+            return out;
+          };
+          const skip = new Set(
+            [
+              ctx.next?.artist,
+              ctx.next?.title,
+              ctx.next?.album,
+              ...staying,
+              ...ctx.handover.leaving,
+              ...ctx.handover.arriving,
+            ]
+              .filter(Boolean)
+              .flatMap((x) => fold(String(x)).match(/\p{L}+/gu) ?? []),
+          );
+          const mine = grams(text, skip);
+          const seen = new Set<string>();
+          for (const old of this.recentHandoverTexts())
+            for (const g of grams(old, skip)) if (mine.has(g)) seen.add(g);
+          // Povinné obraty z faktů („vrátím se ve tři“, „sám do tří“) se opakovat smí.
+          for (const g of grams(facts.lines.join(" "), skip)) seen.delete(g);
+          if (seen.size >= 2)
+            hits.push(
+              `opakuje obraty z minulých předávek („${[...seen].slice(0, 2).join("“, „")}“)`,
+            );
+        }
+        const stock =
+          /\b(měj(te)? se fajn|ať se daří|fajn tým|pro dnešek končím|noční směn)/i.exec(
+            text,
+          );
+        if (stock) hits.push(`ohraná fráze „${stock[0]}“ — řekni to jinak`);
+        if (/díky za pozornost|na shledanou/i.test(text))
+          hits.push("úřední fráze („díky za pozornost“, „na shledanou“)");
         // Kdo zůstává a teď nemluví, musí zaznít (příchozí řekne, s kým bude).
         const speaking = ctx.hosts.map((h) => h.name);
         for (const n of ctx.handover.staying ?? []) {
@@ -2326,6 +2771,7 @@ export class AiDj {
           ...ctx.handover.leaving,
           ...ctx.handover.arriving,
           ...(ctx.handover.staying ?? []),
+          ...facts.nextNames,
         ]);
         for (const other of new Set(
           (this.settings.hosts ?? []).map((x) => x.name),
@@ -2444,7 +2890,7 @@ export class AiDj {
         err instanceof Error ? err.message : err,
       );
     }
-    const clean = (s: string, max: number) =>
+    const clean = (s: string) =>
       s
         .replace(/\[[^\]]{1,24}\]/g, (tag) => cleanTags(tag, emotions))
         // Tag na konci nic nezahraje (patří před větu) → pryč.
@@ -2453,11 +2899,23 @@ export class AiDj {
         // Emoji se nečtou nahlas.
         .replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "")
         .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, max);
+        .trim();
+    // Nikdy neuseknout uprostřed věty: příliš dlouhý text zkrátit na celé věty.
+    const fit = (t: string, max: number) => {
+      if (t.length <= max) return t;
+      const cut = t.slice(0, max);
+      const end = Math.max(
+        cut.lastIndexOf(". "),
+        cut.lastIndexOf("! "),
+        cut.lastIndexOf("? "),
+      );
+      return end > max * 0.4
+        ? cut.slice(0, end + 1)
+        : cut.replace(/[,;:\s—–-]+\S*$/, "") + ".";
+    };
 
     if (!dialog) {
-      const text = clean(body, 320);
+      const text = fit(clean(body), ctx.focus === "daily-summary" ? 480 : 360);
       if (text.length < 10) throw new Error("Model nevrátil žádný text.");
       return [{ name: a!.name, voiceId: a!.voiceId, text }];
     }
@@ -2491,12 +2949,12 @@ export class AiDj {
         );
         if (speaker) said = m[2]!;
       }
-      const text = clean(said, 260);
+      const text = fit(clean(said), 300);
       if (text.length < 2) continue;
       const prev = out[out.length - 1];
       // Řádek bez jména pokračuje předchozí replikou.
       if (!speaker && prev) {
-        prev.text = `${prev.text} ${text}`.slice(0, 260);
+        prev.text = fit(`${prev.text} ${text}`, 300);
         continue;
       }
       speaker ??= a!;

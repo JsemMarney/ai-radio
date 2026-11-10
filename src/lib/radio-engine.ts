@@ -95,6 +95,7 @@ import { censor, cleanInput, containsLink } from "@/lib/profanity";
 import {
   areSongRequestsEnabled,
   getMaxRequestQueue,
+  getLibraryList,
   getRequestableTracks,
   isRequestModerationEnabled,
 } from "@/lib/song-requests";
@@ -293,6 +294,9 @@ function toPublic(entry: CatalogEntry, requested = false): RadioNowPlaying {
  * Mixer běží na hodinách podle počtu vzorků, takže tempo je přesné a stream je
  * jeden souvislý proud bez mezer mezi skladbami.
  */
+/** Kolik minut před předávkou směny AI mlčí (běžné vstupy, zprávy). */
+const HANDOVER_QUIET_MIN = 15;
+
 export class RadioEngine {
   private outputs = new Map<StreamFormat, Output>();
   private sinks = new Set<BroadcastSink>();
@@ -1889,6 +1893,7 @@ export class RadioEngine {
       nearHour &&
       hourOf.hour % everyH === 0 &&
       this.djHourlyKey !== hourKey &&
+      !this.aiDj.shiftChangeWithin(airAt, HANDOVER_QUIET_MIN) &&
       this.aiDj.isConfigured() &&
       this.canDjSpeak() &&
       !this.aiDj.isBusy &&
@@ -1934,6 +1939,9 @@ export class RadioEngine {
     if (!this.aiDj.budget().canSpeak) return;
     // Nikdo nemá směnu → AutoDJ, nic se nechystá (rozestup se nepočítá znovu).
     if (!this.aiDj.hostsAt(new Date(), this.djFallbackName()).length) return;
+    // Za chvíli je předávka směny → teď mlčet (dva vstupy pár minut po sobě zní hloupě
+    // a stojí kredity). Rozestup zůstává naplněný, předávka ho pak vynuluje.
+    if (this.aiDj.shiftChangeWithin(airAt, HANDOVER_QUIET_MIN)) return;
     this.resetDjGap();
     void this.prepareDjFor(item);
   }
@@ -1942,7 +1950,21 @@ export class RadioEngine {
   private handleShiftChange(item: PreparedTrack): boolean {
     const fallback = this.djFallbackName();
     // Směna platí ve chvíli, kdy vstup zazní — na začátku další skladby.
-    const at = this.nextTrackStartsAt();
+    let at = this.nextTrackStartsAt();
+    // Předávka patří na hranici skladeb, která je změně směny nejblíž: když směna končí
+    // za 2 minuty a další hranice bude až za 4, předávka zazní už teď (nejvýš 15 min předem).
+    let early = false;
+    {
+      const after = new Date(at.getTime() + (item.durationSec || 210) * 1000);
+      const change = this.aiDj.shiftChangeBetween(at, after);
+      if (change) {
+        const before = change.getTime() - at.getTime();
+        if (before <= HANDOVER_QUIET_MIN * 60_000 && before < after.getTime() - change.getTime()) {
+          at = new Date(change.getTime() + 60_000);
+          early = true;
+        }
+      }
+    }
     const arrivingHosts = this.aiDj.hostsAt(at, fallback);
     const names = arrivingHosts.map((h) => h.name);
     const prev = this.aiDj.shiftNames();
@@ -2014,7 +2036,12 @@ export class RadioEngine {
     );
     void this.prepareDjFor(item, "handover", {
       hosts: speakers,
-      handover: { leaving, arriving, staying },
+      handover: {
+        leaving,
+        arriving,
+        staying,
+        ...(early ? { at: at.toISOString() } : {}),
+      },
     });
     return true;
   }
@@ -2444,6 +2471,28 @@ export class RadioEngine {
     return this.preparing;
   }
 
+  /**
+   * Vynuluje statistiky přehrání (počty a přeskočení, přání zůstávají) a zapomene
+   * historii kromě posledních písniček — rotace pak míchá celou knihovnu rovnoměrně.
+   */
+  async resetPlayStats(): Promise<{ ok: true; tracks: number }> {
+    let n = 0;
+    for (const [id, s] of Object.entries(this.playStats)) {
+      if (s.requests) this.playStats[id] = { requests: s.requests } as TrackPlayStats;
+      else delete this.playStats[id];
+      n++;
+    }
+    // Posledních 40 si nechá, ať se hned neopakuje, co právě hrálo.
+    this.history = this.history.slice(0, 40);
+    // Připravené pořadí rotace zahodit a namíchat znovu (přání a „zařazené“ zůstávají).
+    this.queue = [];
+    await this.refillQueue();
+    void this.persistRotation();
+    this.emitStatus(true);
+    radioLog("↺", c.cyan(`Statistiky přehrání vynulovány (${n} skladeb) — rotace míchá znovu`));
+    return { ok: true, tracks: n };
+  }
+
   private async refillQueue(): Promise<void> {
     const catalog = await getCatalog();
     const current =
@@ -2565,7 +2614,19 @@ export class RadioEngine {
   /** Přesune skladbu v rotační frontě (requesty a připravená skladba zůstávají před ní). */
   async moveInQueue(uuid: string, toIndex: number): Promise<boolean> {
     const from = this.queue.indexOf(uuid);
-    if (from < 0) return false;
+    if (from < 0) {
+      // Skladba ve frontě není → přidat ji (studio „Přidat do fronty“).
+      const catalog = await getCatalog();
+      const playing =
+        this.main?.kind === "track" ? this.main.uuid : this.nowPlaying?.uuid;
+      if (
+        !catalog.has(uuid) ||
+        uuid === playing ||
+        uuid === this.next?.uuid ||
+        this.requests.includes(uuid)
+      )
+        return false;
+    }
     const next = this.queue.filter((id) => id !== uuid);
     const idx = Math.min(Math.max(0, Math.floor(toIndex)), next.length);
     next.splice(idx, 0, uuid);
@@ -2870,6 +2931,14 @@ export class RadioEngine {
       else aiIndex = Math.max(1, this.djGap - this.djTracks);
     }
 
+    // Předávky směn: stejně jako handleShiftChange — směna platí na začátku skladby,
+    // předávka se posune na dřívější hranici, když je změně blíž (nejvýš 15 min předem).
+    const fallback = this.djFallbackName();
+    let shiftNow = (this.aiDj.shiftNames() ?? this.aiDj.hostsAt(new Date(), fallback).map((h) => h.name))
+      .slice()
+      .sort()
+      .join("|");
+
     items.forEach((item, i) => {
       // Stejně jako buildProgramSchedule; u připravené skladby (i = 0) platí skutečný stav.
       if (showStingers && stingerCounter === 1) {
@@ -2880,7 +2949,38 @@ export class RadioEngine {
       stingerCounter -= 1;
       if (item.stingerBefore) cursor += this.midsongDurationSec * 1000;
       item.startsAtMs = Math.round(cursor);
-      if (aiOn && i === aiIndex) {
+      const durMs =
+        (item.durationSec && item.durationSec > 0 ? item.durationSec : 210) * 1000;
+      let handover = false;
+      if (aiOn) {
+        let at = new Date(cursor);
+        const change = this.aiDj.shiftChangeBetween(at, new Date(cursor + durMs));
+        if (change) {
+          const before = change.getTime() - cursor;
+          if (before <= HANDOVER_QUIET_MIN * 60_000 && before < cursor + durMs - change.getTime())
+            at = new Date(change.getTime() + 60_000);
+        }
+        const names = this.aiDj.hostsAt(at, fallback).map((h) => h.name);
+        const key = names.slice().sort().join("|");
+        if (key !== shiftNow) {
+          const prev = shiftNow ? shiftNow.split("|") : [];
+          const left = prev.filter((n) => !names.includes(n));
+          const came = names.filter((n) => !prev.includes(n));
+          item.handoverBefore = !came.length
+            ? `${left.join(" & ")} končí`
+            : !left.length
+              ? `+ ${came.join(" & ")}`
+              : `${left.join(" & ")} → ${came.join(" & ")}`;
+          shiftNow = key;
+          handover = true;
+          // Předávka počítadlo vynuluje — další běžný vstup až po celé mezeře.
+          aiIndex = i + nextDjGap();
+        }
+      }
+      // 15 min před změnou směny běžný vstup nezazní (počká se na předávku).
+      if (aiOn && !handover && i === aiIndex && this.aiDj.shiftChangeWithin(new Date(cursor), HANDOVER_QUIET_MIN))
+        aiIndex += 1;
+      if (aiOn && !handover && i === aiIndex) {
         const hosts = this.aiDj.hostsAt(
           new Date(cursor),
           this.djFallbackName(),
@@ -2963,6 +3063,11 @@ export class RadioEngine {
       ...this.history.slice(0, REQUEST_COOLDOWN),
       ...this.broken,
     ].filter((id): id is string => Boolean(id));
+  }
+
+  /** Celá knihovna pro stránku posluchačů. */
+  async getLibrary() {
+    return getLibraryList(this.blockedForRequest());
   }
 
   async getRequestableTracks(search?: string, limit = 40) {

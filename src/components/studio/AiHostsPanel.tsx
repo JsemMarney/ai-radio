@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { AiDjState, AiHost } from "@/lib/ai-dj";
+import { HostsWeekTimetable } from "@/components/studio/HostsWeekTimetable";
 
 /** Pondělí první, jak je zvykem v Česku (hodnoty: 0 = neděle … 6 = sobota). */
 const DAYS: [number, string][] = [
@@ -33,18 +34,6 @@ function toMin(hhmm: string): number {
   return (h ?? 0) * 60 + (m ?? 0);
 }
 
-/** Úseky směny během dne v minutách (přes půlnoc = dva úseky). */
-function segments(h: AiHost): [number, number][] {
-  const from = toMin(h.from);
-  const to = toMin(h.to);
-  if (from === to) return [[0, 1440]];
-  if (from < to) return [[from, to]];
-  return [
-    [from, 1440],
-    [0, to],
-  ];
-}
-
 /** Studio → Moderátoři: AI moderátoři se směnami a vlastními hlasy ElevenLabs. */
 export function AiHostsPanel() {
   const [state, setState] = useState<AiDjState | null>(null);
@@ -52,6 +41,8 @@ export function AiHostsPanel() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  /** Směna → moderátor (karta). Pevné, ať se karta při přepisování jména nerozpadne. */
+  const [groupOf, setGroupOf] = useState<Record<string, string>>({});
 
   const load = useCallback(async (resetForm: boolean) => {
     try {
@@ -110,8 +101,25 @@ export function AiHostsPanel() {
   if (!state) return <p className="text-sm text-[var(--ink-muted)]">Načítám…</p>;
 
   const active = state.activeHosts ?? [];
-  const now = new Date();
-  const nowMin = now.getHours() * 60 + now.getMinutes();
+  // Stejné jméno = stejná barva (jeden moderátor může mít víc směn).
+  const names = [...new Set(hosts.map((h) => h.name.trim()).filter(Boolean))];
+  // Jeden moderátor = jedna karta, v ní všechny jeho směny (v datech je každá směna zvlášť).
+  const groups: AiHost[][] = [];
+  const byName = new Map<string, AiHost[]>();
+  for (const h of hosts) {
+    const key = groupOf[h.id] ?? (h.name.trim().toLowerCase() || `id:${h.id}`);
+    let g = byName.get(key);
+    if (!g) {
+      g = [];
+      byName.set(key, g);
+      groups.push(g);
+    }
+    g.push(h);
+  }
+  const colorOf = (name: string) => {
+    const i = names.indexOf(name.trim());
+    return HOST_COLORS[(i < 0 ? 0 : i) % HOST_COLORS.length]!;
+  };
 
   return (
     <div className="space-y-6">
@@ -142,147 +150,189 @@ export function AiHostsPanel() {
             : " Mimo směny AI mlčí a hraje AutoDJ."}
         </p>
 
-        {/* Dnešní rozpis: kdo kdy mluví (překryv = rozhovor). */}
-        {hosts.length ? (
-          <div className="mt-5">
-            <div className="relative h-2 rounded-full bg-[var(--line)]">
-              <span
-                className="absolute -top-1 h-4 w-0.5 bg-[var(--ink)]"
-                style={{ left: `${(nowMin / 1440) * 100}%` }}
-                title="Teď"
-              />
-            </div>
-            <div className="mt-2 space-y-1.5">
-              {hosts.map((h, i) =>
-                h.days.includes(now.getDay()) && h.enabled ? (
-                  <div key={h.id} className="flex items-center gap-3 text-xs">
-                    <span className="w-24 shrink-0 truncate text-[var(--ink-muted)]">{h.name || "bez jména"}</span>
-                    <div className="relative h-3 flex-1 rounded-full bg-[var(--line)]/50">
-                      {segments(h).map(([a, b]) => (
-                        <span
-                          key={a}
-                          className="absolute inset-y-0 rounded-full"
-                          style={{
-                            left: `${(a / 1440) * 100}%`,
-                            width: `${((b - a) / 1440) * 100}%`,
-                            background: HOST_COLORS[i % HOST_COLORS.length],
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ) : null,
-              )}
-            </div>
-            <div className="mt-1 flex justify-between pl-[6.75rem] font-[family-name:var(--font-mono)] text-[10px] text-[var(--ink-faint)]">
-              <span>0</span>
-              <span>6</span>
-              <span>12</span>
-              <span>18</span>
-              <span>24</span>
-            </div>
-          </div>
-        ) : null}
+        <HostsWeekTimetable hosts={hosts} colorOf={colorOf} />
       </section>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        {hosts.map((h, i) => (
-          <section
-            key={h.id}
-            className={`rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/60 p-4 ${h.enabled ? "" : "opacity-60"}`}
-          >
-            <div className="flex items-center gap-3">
-              <span
-                className="h-3 w-3 shrink-0 rounded-full"
-                style={{ background: HOST_COLORS[i % HOST_COLORS.length] }}
-                aria-hidden
-              />
-              <input
-                value={h.name}
-                onChange={(e) => patch(h.id, { name: e.target.value.slice(0, 40) })}
-                placeholder="Jméno moderátora"
-                aria-label="Jméno moderátora"
-                className="min-w-0 flex-1 border-b border-[var(--line-strong)] bg-transparent py-1 text-base font-semibold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-              />
-              {active.includes(h.name) && state.settings.enabled ? (
-                <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider">
-                  teď
-                </span>
-              ) : null}
-            </div>
-
-            <label className="mt-3 block text-xs text-[var(--ink-muted)]">
-              ElevenLabs voice ID
-              <input
-                value={h.voiceId}
-                onChange={(e) => patch(h.id, { voiceId: e.target.value.trim() })}
-                placeholder="např. 21m00Tcm4TlvDq8ikWAM"
-                spellCheck={false}
-                className="mt-1 block w-full border-b border-[var(--line-strong)] bg-transparent py-1 font-[family-name:var(--font-mono)] text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-              />
-            </label>
-
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-[var(--ink-muted)]">
-              Mluví od
-              <input
-                type="time"
-                value={h.from}
-                onChange={(e) => patch(h.id, { from: e.target.value })}
-                className="border-b border-[var(--line-strong)] bg-transparent py-1 text-sm text-[var(--ink)] outline-none [color-scheme:dark]"
-              />
-              do
-              <input
-                type="time"
-                value={h.to}
-                onChange={(e) => patch(h.id, { to: e.target.value })}
-                className="border-b border-[var(--line-strong)] bg-transparent py-1 text-sm text-[var(--ink)] outline-none [color-scheme:dark]"
-              />
-              {h.from === h.to ? <span className="text-[var(--ink-faint)]">(celý den)</span> : null}
-              {toMin(h.from) > toMin(h.to) ? <span className="text-[var(--ink-faint)]">(přes půlnoc)</span> : null}
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {DAYS.map(([d, label]) => {
-                const on = h.days.includes(d);
-                return (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => patch(h.id, { days: on ? h.days.filter((x) => x !== d) : [...h.days, d] })}
-                    className={`h-8 w-9 rounded-full text-xs font-semibold transition-colors ${
-                      on ? "bg-[var(--accent)] text-[var(--ink)]" : "bg-[var(--line)] text-[var(--ink-muted)]"
-                    }`}
-                    aria-pressed={on}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="mt-4 flex items-center justify-between">
-              <label className="flex items-center gap-2 text-sm text-[var(--ink)]">
+      <div className="grid gap-4 xl:grid-cols-2">
+        {groups.map((g) => {
+          const first = g[0]!;
+          const ids = new Set(g.map((x) => x.id));
+          const groupKey = groupOf[first.id] ?? (first.name.trim().toLowerCase() || `id:${first.id}`);
+          const pin = (extra: string[] = []) =>
+            setGroupOf((m) => {
+              const next = { ...m };
+              for (const id of [...ids, ...extra]) next[id] = groupKey;
+              return next;
+            });
+          const patchAll = (change: Partial<AiHost>) => {
+            if (change.name !== undefined) pin();
+            setHosts((list) => list.map((x) => (ids.has(x.id) ? { ...x, ...change } : x)));
+            setDirty(true);
+            setMessage(null);
+          };
+          const enabled = g.some((x) => x.enabled);
+          const weekly = Math.round(
+            g.reduce((sum, x) => {
+              if (!x.enabled) return sum;
+              const len = x.from === x.to ? 1440 : (toMin(x.to) - toMin(x.from) + 1440) % 1440;
+              return sum + len * x.days.length;
+            }, 0) / 60,
+          );
+          return (
+            <section
+              key={first.id}
+              className={`rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/60 p-4 ${enabled ? "" : "opacity-60"}`}
+            >
+              <div className="flex items-center gap-3">
+                <span className="h-3 w-3 shrink-0 rounded-full" style={{ background: colorOf(first.name) }} aria-hidden />
                 <input
-                  type="checkbox"
-                  checked={h.enabled}
-                  onChange={(e) => patch(h.id, { enabled: e.target.checked })}
-                  className="h-4 w-4 accent-[var(--accent)]"
+                  value={first.name}
+                  onChange={(e) => patchAll({ name: e.target.value.slice(0, 40) })}
+                  placeholder="Jméno moderátora"
+                  aria-label="Jméno moderátora"
+                  className="min-w-0 flex-1 border-b border-[var(--line-strong)] bg-transparent py-1 text-base font-semibold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
                 />
-                Aktivní
+                <span className="shrink-0 text-xs text-[var(--ink-faint)]">{weekly} h týdně</span>
+                {active.includes(first.name) && state.settings.enabled ? (
+                  <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider">
+                    teď
+                  </span>
+                ) : null}
+              </div>
+
+              <label className="mt-3 block text-xs text-[var(--ink-muted)]">
+                ElevenLabs voice ID
+                <input
+                  value={first.voiceId}
+                  onChange={(e) => patchAll({ voiceId: e.target.value.trim() })}
+                  placeholder="např. 21m00Tcm4TlvDq8ikWAM"
+                  spellCheck={false}
+                  className="mt-1 block w-full border-b border-[var(--line-strong)] bg-transparent py-1 font-[family-name:var(--font-mono)] text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                />
               </label>
+
+              <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Směny</p>
+              <ul className="mt-2 space-y-2">
+                {g.map((h) => (
+                  <li
+                    key={h.id}
+                    id={`host-${h.id}`}
+                    className="rounded-xl border border-[var(--line)] bg-[var(--bg-deep)]/40 p-3"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--ink-muted)]">
+                      <input
+                        type="time"
+                        value={h.from}
+                        onChange={(e) => patch(h.id, { from: e.target.value })}
+                        aria-label="Od"
+                        className="border-b border-[var(--line-strong)] bg-transparent py-1 text-sm text-[var(--ink)] outline-none [color-scheme:dark]"
+                      />
+                      –
+                      <input
+                        type="time"
+                        value={h.to}
+                        onChange={(e) => patch(h.id, { to: e.target.value })}
+                        aria-label="Do"
+                        className="border-b border-[var(--line-strong)] bg-transparent py-1 text-sm text-[var(--ink)] outline-none [color-scheme:dark]"
+                      />
+                      {h.from === h.to ? <span className="text-[var(--ink-faint)]">(celý den)</span> : null}
+                      {toMin(h.from) > toMin(h.to) ? <span className="text-[var(--ink-faint)]">(přes půlnoc)</span> : null}
+                      <span className="flex-1" />
+                      {g.length > 1 ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setHosts((list) => list.filter((x) => x.id !== h.id));
+                            setDirty(true);
+                          }}
+                          className="text-[var(--ink-faint)] hover:text-[var(--danger)]"
+                          aria-label="Smazat směnu"
+                          title="Smazat směnu"
+                        >
+                          ✕
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-1">
+                      {DAYS.map(([d, label]) => {
+                        const on = h.days.includes(d);
+                        return (
+                          <button
+                            key={d}
+                            type="button"
+                            onClick={() => patch(h.id, { days: on ? h.days.filter((x) => x !== d) : [...h.days, d] })}
+                            className={`h-7 w-8 rounded-full text-[11px] font-semibold transition-colors ${
+                              on ? "bg-[var(--accent)] text-[var(--ink)]" : "bg-[var(--line)] text-[var(--ink-muted)]"
+                            }`}
+                            aria-pressed={on}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                      <span className="ml-1 flex gap-1 text-[10px] text-[var(--ink-faint)]">
+                        {(
+                          [
+                            ["Po–Pá", [1, 2, 3, 4, 5]],
+                            ["So–Ne", [0, 6]],
+                            ["Denně", [0, 1, 2, 3, 4, 5, 6]],
+                          ] as [string, number[]][]
+                        ).map(([label, days]) => (
+                          <button
+                            key={label}
+                            type="button"
+                            onClick={() => patch(h.id, { days })}
+                            className="rounded-full border border-[var(--line)] px-2 py-1 hover:border-[var(--accent)] hover:text-[var(--ink)]"
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
               <button
                 type="button"
                 onClick={() => {
-                  setHosts((list) => list.filter((x) => x.id !== h.id));
+                  const last = g[g.length - 1]!;
+                  const added = newHost();
+                  pin([added.id]);
+                  setHosts((list) => [
+                    ...list,
+                    { ...added, name: first.name, voiceId: first.voiceId, enabled: first.enabled, from: last.to, to: last.to === "22:00" ? "23:00" : "22:00", days: [...last.days] },
+                  ]);
                   setDirty(true);
                 }}
-                className="text-xs text-[var(--danger)] hover:underline"
+                className="mt-2 w-full rounded-xl border border-dashed border-[var(--line-strong)] py-2 text-xs font-semibold text-[var(--ink-muted)] transition-colors hover:border-[var(--accent)] hover:text-[var(--ink)]"
               >
-                Odebrat
+                + Přidat směnu (jiný čas nebo jiné dny)
               </button>
-            </div>
-          </section>
-        ))}
+
+              <div className="mt-4 flex items-center justify-between">
+                <label className="flex items-center gap-2 text-sm text-[var(--ink)]">
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    onChange={(e) => patchAll({ enabled: e.target.checked })}
+                    className="h-4 w-4 accent-[var(--accent)]"
+                  />
+                  Aktivní
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHosts((list) => list.filter((x) => !ids.has(x.id)));
+                    setDirty(true);
+                  }}
+                  className="text-xs text-[var(--danger)] hover:underline"
+                >
+                  Odebrat moderátora
+                </button>
+              </div>
+            </section>
+          );
+        })}
 
         <button
           type="button"

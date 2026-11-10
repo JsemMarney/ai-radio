@@ -46,7 +46,12 @@ function statusText(r: RequestStatusView): { text: string; tone: "wait" | "ok" |
   }
 }
 
-export function SongRequestPanel() {
+export function SongRequestPanel({
+  pick,
+}: {
+  /** Písnička vybraná jinde (knihovna) — rovnou otevře formulář přání. */
+  pick?: { track: RadioNowPlaying; n: number } | null;
+} = {}) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [query, setQuery] = useState("");
   const [tracks, setTracks] = useState<RadioNowPlaying[]>([]);
@@ -58,6 +63,15 @@ export function SongRequestPanel() {
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [mine, setMine] = useState<Stored[]>([]);
   const [statuses, setStatuses] = useState<RequestStatusView[]>([]);
+
+  useEffect(() => {
+    if (!pick) return;
+    const t = setTimeout(() => {
+      setSelected(pick.track);
+      setFeedback(null);
+    }, 0);
+    return () => clearTimeout(t);
+  }, [pick]);
 
   const load = useCallback(async (search: string) => {
     try {

@@ -294,6 +294,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/stats/reset") {
+    sendJson(res, 200, await engine.resetPlayStats());
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/stats") {
     sendJson(res, 200, await engine.getLibraryStats());
     return;
@@ -365,6 +370,12 @@ async function handleRequest(
     );
     const preview = await engine.getQueuePreview(limit);
     sendJson(res, 200, preview);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/library") {
+    const tracks = await engine.getLibrary();
+    sendJson(res, 200, { requests: areSongRequestsEnabled(), tracks });
     return;
   }
 

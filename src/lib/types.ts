@@ -176,6 +176,8 @@ export type StudioQueueItem = RadioNowPlaying & {
   startsAtMs?: number;
   /** Odhad: přes začátek promluví AI moderátor (jména). */
   aiBefore?: string;
+  /** Odhad: přes začátek zazní předávka směny (např. „Zdenda → Martin“). */
+  handoverBefore?: string;
 };
 
 export type LibraryStatsRow = {

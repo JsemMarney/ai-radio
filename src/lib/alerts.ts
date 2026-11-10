@@ -11,6 +11,8 @@ function cooldownMs(): number {
 }
 
 export async function sendAlert(key: string, message: string): Promise<void> {
+  // Lokální vývoj (.claude/dev-open.cjs) nesmí posílat upozornění na ostrý Discord.
+  if (process.env.RADIO_NO_ALERTS === "1") return;
   const url = process.env.DISCORD_WEBHOOK_URL?.trim();
   if (!url || !/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(url)) return;
   const now = Date.now();

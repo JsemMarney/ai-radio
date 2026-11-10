@@ -206,7 +206,7 @@ export async function listTracksWithAudio(options?: {
  * Remixy, živáky a covery jsou jiné nahrávky — ty se nesjednocují.
  */
 const SAME_SONG_SUFFIX =
-  /\b(remaster(ed)?|radio edit|single version|album version|original mix|explicit|clean|mono|stereo|bonus track|deluxe|soundtrack|from ".*")\b/i;
+  /\b(remaster(ed)?|radio edit|single version|album version|original mix|original version|(7|12)\s?("|”|inch|in)?\s?mix|club mix|extended (mix|version)|radio (mix|version)|short (mix|version)|explicit|clean|mono|stereo|bonus track|deluxe|soundtrack|from ".*")\b/i;
 
 function stripVersionInfo(title: string): string {
   return title

@@ -1,7 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  LISTENER_TABS,
+  listenerTabFromPath,
+  playerPath,
+  type ListenerTab,
+} from "@/lib/page-tabs";
 import {
   ListenButton,
   LiveBadge,
@@ -15,9 +21,10 @@ import { FavoriteAlert, FavoriteButton } from "@/components/player/Favorites";
 import { SongRequestPanel } from "@/components/player/SongRequestPanel";
 import { MessagePanel } from "@/components/player/MessagePanel";
 import { SuggestPanel } from "@/components/player/SuggestPanel";
+import { LibraryPanel } from "@/components/player/LibraryPanel";
 import { useRadio } from "@/components/RadioProvider";
 import { useCoverTint } from "@/components/player/useCoverTint";
-import type { StationConfig } from "@/lib/types";
+import type { RadioNowPlaying, StationConfig } from "@/lib/types";
 
 function StationClock() {
   const [now, setNow] = useState<Date | null>(null);
@@ -70,7 +77,13 @@ function Ticker({ items }: { items: string[] }) {
   );
 }
 
-export function PlayerClient({ station }: { station: StationConfig }) {
+export function PlayerClient({
+  station,
+  initialTab = "request",
+}: {
+  station: StationConfig;
+  initialTab?: ListenerTab;
+}) {
   const {
     playing,
     nowPlaying,
@@ -259,7 +272,7 @@ export function PlayerClient({ station }: { station: StationConfig }) {
         {/* Na počítači má karta s přáními stejnou výšku jako „Hrálo“ — seznam se roztáhne, zbytek se posouvá. */}
         <div className="animate-fade-up grid items-start gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-stretch">
           <Card fill>
-            <ListenerTabs />
+            <ListenerTabs initialTab={initialTab} />
           </Card>
           <Card>
             <h2 className="mb-4 text-xl font-bold tracking-tight">Hrálo</h2>
@@ -303,39 +316,54 @@ export function PlayerClient({ station }: { station: StationConfig }) {
   );
 }
 
-type ListenerTab = "request" | "suggest" | "message";
-
-const LISTENER_TABS: [ListenerTab, string, string][] = [
-  ["request", "Přej si písničku", "Přání"],
-  ["suggest", "Navrhni novou", "Navrhnout"],
-  ["message", "Vzkaz do studia", "Vzkaz"],
-];
-
-/** Všechno, co posluchač může poslat do studia — v jedné kartě se záložkami. */
-function ListenerTabs() {
-  const [tab, setTab] = useState<ListenerTab>("request");
+/** Všechno, co posluchač může poslat do studia — v jedné kartě se záložkami (každá má adresu). */
+function ListenerTabs({ initialTab }: { initialTab: ListenerTab }) {
+  const [tab, setTabState] = useState<ListenerTab>(initialTab);
+  const setTab = useCallback((next: ListenerTab) => {
+    setTabState(next);
+    const path = playerPath(next);
+    if (window.location.pathname !== path) window.history.pushState(null, "", path);
+  }, []);
+  useEffect(() => {
+    const onPop = () => setTabState(listenerTabFromPath(window.location.pathname));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const [pick, setPick] = useState<{ track: RadioNowPlaying; n: number } | null>(null);
   return (
     <section className="flex min-h-0 flex-col lg:h-full">
       <div className="mb-5 flex shrink-0 gap-1 overflow-x-auto rounded-full border border-[var(--line)] bg-[var(--bg-deep)]/60 p-1" role="tablist">
-        {LISTENER_TABS.map(([value, label, short]) => (
-          <button
+        {LISTENER_TABS.map(({ tab: value, label, short }) => (
+          <a
             key={value}
-            type="button"
+            href={playerPath(value)}
             role="tab"
             aria-selected={tab === value}
-            onClick={() => setTab(value)}
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+              e.preventDefault();
+              setTab(value);
+            }}
             className={`flex-1 whitespace-nowrap rounded-full px-3 py-2 text-sm font-semibold transition-colors ${
               tab === value ? "btn-glow text-[var(--ink)]" : "text-[var(--ink-muted)] hover:bg-[var(--ink)]/5 hover:text-[var(--ink)]"
             }`}
           >
-            <span className="hidden sm:inline">{label}</span>
-            <span className="sm:hidden">{short}</span>
-          </button>
+            <span className="hidden 2xl:inline">{label}</span>
+            <span className="2xl:hidden">{short}</span>
+          </a>
         ))}
       </div>
       {/* Panely zůstávají připojené — rozepsaný vzkaz ani hledání se přepnutím neztratí. */}
       <div className={tab === "request" ? "min-h-0 flex-1" : "hidden"}>
-        <SongRequestPanel />
+        <SongRequestPanel pick={pick} />
+      </div>
+      <div className={tab === "library" ? "min-h-0 flex-1" : "hidden"}>
+        <LibraryPanel
+          onRequest={(track) => {
+            setPick((p) => ({ track, n: (p?.n ?? 0) + 1 }));
+            setTab("request");
+          }}
+        />
       </div>
       <div hidden={tab !== "suggest"}>
         <SuggestPanel />

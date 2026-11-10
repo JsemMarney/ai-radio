@@ -60,6 +60,37 @@ export async function getRequestableTracks(options?: {
   return out;
 }
 
+export type LibraryTrack = RadioNowPlaying & {
+  /** Jde si ji teď přát (nehrála nedávno, není ve frontě). */
+  requestable: boolean;
+};
+
+/** Celá knihovna pro posluchače (bez duplicitních verzí), seřazená podle interpreta. */
+export async function getLibraryList(
+  blockedUuids: string[] = [],
+): Promise<LibraryTrack[]> {
+  const blocked = new Set(blockedUuids);
+  const catalog = await getCatalog();
+  const out: LibraryTrack[] = [];
+  for (const t of catalog.values()) {
+    out.push({
+      uuid: t.uuid,
+      title: t.title,
+      artist: t.artist,
+      album: t.album,
+      year: t.year,
+      thumbnail: t.thumbnail,
+      durationSec: t.durationSec,
+      requestable: !blocked.has(t.uuid),
+    });
+  }
+  return out.sort(
+    (a, b) =>
+      a.artist.localeCompare(b.artist, "cs", { sensitivity: "base" }) ||
+      a.title.localeCompare(b.title, "cs", { sensitivity: "base" }),
+  );
+}
+
 export async function validateListenerRequest(
   uuid: string,
   blockedUuids: string[],

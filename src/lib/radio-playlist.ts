@@ -128,7 +128,9 @@ export function pickRotationTrack(
   });
 
   const total = catalog.size;
-  const neverPlayedAge = total * 2;
+  // Nehraná skladba = jako ta, co hrála nejdávněji (ne dvojnásob) — nové písničky
+  // se tak nepouštějí pořád dokola.
+  const neverPlayedAge = Math.max(total, recent.length);
   const age = (id: string) => lastSeen.get(id) ?? neverPlayedAge;
 
   // 1) song separation — postupně povolujeme, když není z čeho vybírat
@@ -171,7 +173,7 @@ export function pickRotationTrack(
     let w = Math.pow(Math.min(age(id), neverPlayedAge) + 1, 1.5);
     // Ohraná skladba (víc než průměr) ztrácí šanci, nehraná / nová ji získává.
     const p = stats?.plays ?? 0;
-    w *= Math.pow((avgPlays + 1) / (p + 1), 2);
+    w *= Math.min(2, Math.max(0.35, Math.pow((avgPlays + 1) / (p + 1), 1.5)));
     // Přeskakovaná skladba: každé přeskočení −40 % (max 4×), ať úplně nezmizí.
     w *= Math.pow(0.6, Math.min(stats?.skips ?? 0, 4));
     // Oblíbená přání: +35 % za každé (max 5×).

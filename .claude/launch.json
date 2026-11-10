@@ -4,7 +4,30 @@
     {
       "name": "radio-dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "port": 8787,
+      "url": "http://127.0.0.1:8787"
+    },
+    {
+      "name": "web-only",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev:web"
+      ],
+      "port": 8787,
+      "url": "http://127.0.0.1:8787"
+    },
+    {
+      "name": "studio-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        ".claude/dev-open.cjs",
+        "dev"
+      ],
       "port": 8787,
       "url": "http://127.0.0.1:8787"
     }
