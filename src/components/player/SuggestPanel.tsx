@@ -105,7 +105,7 @@ export function SuggestPanel() {
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Hledej na Spotify…"
-        className="w-full rounded-full border border-[var(--line-strong)] bg-[var(--bg-deep)] px-4 py-2.5 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
+        className="w-full rounded-md border border-[var(--line-strong)] bg-[var(--bg-deep)] px-4 py-2.5 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
       />
       {results.length ? (
         <>
@@ -129,7 +129,7 @@ export function SuggestPanel() {
                       type="button"
                       disabled={sent || busyId === t.id}
                       onClick={() => void suggest(t)}
-                      className="shrink-0 rounded-full border border-[var(--line-strong)] px-3 py-1 text-xs text-[var(--ink)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
+                      className="shrink-0 rounded-md border border-[var(--line-strong)] px-3 py-1 text-xs text-[var(--ink)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
                     >
                       {sent ? "Odesláno" : busyId === t.id ? "Posílám…" : "Navrhnout"}
                     </button>

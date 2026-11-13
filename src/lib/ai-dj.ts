@@ -511,14 +511,33 @@ const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 // nemotron-3.5-super-vl ~1 s (nejlepší čeština z rychlých), nemotron-lightning ~1 s,
 // gemma-4 ~30 s, nemotron-bolt ~1 s (slabší čeština). Mistral Large 4 přemýšlení vypnout
 // nejde — za 2 min napsal jen úvahu bez textu, proto tu není.
+// Test 11. 11. 2026: nemotron-3-ultra vrací směs písem (rozbitý endpoint) → až na konec;
+// deepseek-v4.1-flash, glm-5.3-flash, minimax-m3.1-flash, gemma-4 a mistral-large-4
+// neodpověděly do 2 min; kimi, mistral-large-2, palmyra a llama-nemotron-ultra hlásí 404.
+// Nejlepší funkční čeština teď: nemotron-3.5-super-vl (~1–3 s).
 const NVIDIA_MODELS = [
-  // Nejlepší čeština z free NVIDIA modelů (test 11/2026) a rychlý (4–13 s).
-  "nvidia/nemotron-3-ultra-550b-a55b",
   "nvidia/nemotron-3.5-super-vl-120b-a12b",
   "nvidia/nemotron-3.5-lightning-30b-a3b",
-  "nvidia/nemotron-3.5-bolt-e4b",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "google/gemma-4-31b-it",
+  "nvidia/nemotron-3.5-bolt-e4b",
 ];
+
+/** Text, který není čeština: cizí písma (azbuka, řečtina, CJK…) nebo skoro žádná písmena. */
+export function looksGarbled(text: string, source = ""): boolean {
+  const t = text.replace(/\[[^\]]{1,24}\]/g, "").trim();
+  // Znaky z podkladů (název písničky azbukou…) se nepočítají.
+  const known = new Set(source);
+  const foreign = (t.match(/[^\p{Script=Latin}\p{N}\p{P}\p{Z}\p{S}\s]/gu) ?? []).filter(
+    (ch) => !known.has(ch),
+  ).length;
+  const letters = (t.match(/\p{L}/gu) ?? []).length;
+  // Krátká odpověď (číslo verze od „poroty“) je v pořádku, pokud v ní nejsou cizí znaky.
+  return (
+    foreign > Math.max(0, Math.floor(t.length * 0.02)) ||
+    (t.length >= 8 && letters < t.length * 0.5)
+  );
+}
 
 /** fetch, který při timeoutu řekne, která služba neodpověděla. */
 async function fetchOrExplain(
@@ -560,7 +579,10 @@ Pravidla:
 - Pokud znáš další písničku, zakonči vstup jejím krátkým uvedením. Uvádění střídej — ne pořád „teď začíná X s písní Y“, ale třeba „jedeme dál s…“, „pouštím vám…“, „tady je…“, „a teď…“, nebo jen interpret a název.
 - Nepozdravuj „dobrý den“ ani „ahoj posluchači“ v každém vstupu a neopakuj stále stejné fráze.
 - Název rádia neskloňuj a nekomoli — vždy přesně tak, jak je v podkladech.
-- Piš celé, gramaticky správné české věty (žádné anglické vatové slovo jako „cut“).`;
+- Piš celé, gramaticky správné české věty (žádné anglické vatové slovo jako „cut“).
+- Před slovem na s, z, š, ž piš „se“, ne „s“ („se Zarou Larsson“, „se Scooterem“). Když nevíš, jak cizí jméno skloňovat, použij „od“ („Lush Life od Zary Larsson“) nebo jméno dej na začátek („Zara Larsson a Lush Life“).
+- Žádná vymyšlená přirovnání, obrazné ani nesmyslné obraty („rozloupejte si to“, „máme tu sucho“). Radši obyčejná jednoduchá věta.
+- Mluvíš za sebe v první osobě — o sobě nikdy nemluv svým jménem („Josefova směna“ → „moje směna“). Sám sebe neoslovuj ve druhé osobě („teď to rozjedeš“ → „teď to rozjedu“), posluchačům vykej („pošlete“, „užijte si“).`;
 
 /** Korektor: druhý průchod, jen opraví češtinu — obsah, tagy a formát nechá. */
 const CORRECTOR_PROMPT = `Jsi jazykový korektor českého rádia. Dostaneš krátký mluvený text moderátora (nebo rozhovor dvou moderátorů).
@@ -569,6 +591,8 @@ Nic nepřidávej ani neubírej obsahově, neměň fakta, jména, názvy písnič
 Slova, která v češtině neexistují nebo ve větě nedávají smysl (např. „žáběr“, „přáhá“), nahraď běžným českým slovem se stejným významem.
 Anglická slova mimo názvy písniček a jména interpretů (groove, speed-up, vibe, cool…) nahraď českými („rytmus“, „zrychlená verze“, „nálada“, „super“).
 Čísla nech číslicemi (roky vždy celé, např. „2016“), řadové číslovky a čas slovy.
+Hlídej předložky: před s, z, š, ž je „se“ / „ze“ („se Zarou Larsson“). Cizí jména skloňuj, nebo větu přeformuluj („Lush Life od Zary Larsson“).
+Obrat, který nedává smysl, nahraď jednoduchou obyčejnou větou se stejným smyslem.
 U rozhovoru zachovej přesně stejné řádky „Jméno: replika“ ve stejném pořadí. Vrať jen opravený text, nic jiného.`;
 
 const JUDGE_PROMPT =
@@ -578,7 +602,7 @@ const JUDGE_PROMPT =
 const BANNED: { label: string; re: RegExp }[] = [
   {
     label: "úřední fráze („díky za pozornost“, „na shledanou“)",
-    re: /za (vaši )?pozornost|na ?shledanou/i,
+    re: /za (vaši )?pozornost|na ?shledanou|na shledání/i,
   },
   {
     label: "čísla energie / stupnice z podkladů",
@@ -586,7 +610,7 @@ const BANNED: { label: string; re: RegExp }[] = [
   },
   {
     label: "vymyšlený společný zážitek",
-    re: /\b(tu noc|včera|minul[ýo]u?) (jsme|jste)\b|jsme si (to )?(hezky |pěkně )?užil/i,
+    re: /\b(tu noc|včera|minul[ýo]u?) (jsme|jste)\b|jsme si (to )?(dnes |dneska )?(hezky |pěkně )?(užil|zazpíval|zatancoval|zablbl)/i,
   },
   {
     label: "přesný čas po minutách",
@@ -621,7 +645,7 @@ function newsWords(title: string): Set<string> {
 
 /** Anglická slova, která do české moderace nepatří (názvy písniček se kontrolují zvlášť). */
 const ENGLISH_FILLER =
-  /\b(groove|speed-?up|vibe[sz]?|feeling|cool|banger|drop|flow|yeah|awesome|nice|amazing|guys|anyway|chill(ing|ovat)?|sound|track|playlist|feat|right|baby|enjoy|let'?s go)\b/i;
+  /\b(groove|speed-?up|vibe[sz]?|feeling|cool|banger|drop|flow|yeah|awesome|nice|amazing|guys|anyway|chill(ing|ovat)?|sound|track|playlist|feat|right|baby|enjoy|let'?s go|user\w*)\b/i;
 
 const NUM_WORDS: Record<string, number> = {
   nula: 0,
@@ -814,22 +838,22 @@ function handoverBrief(
     "Loučení pokaždé jinými slovy: ne „Tak pro dnešek končím“, „To zní jako fajn tým“, „ať se daří“ ani „Měj se fajn“ — vymysli vlastní, přirozené obraty (např. „já se odpojuju“, „tímhle to za mě uzavírám“, „předávám mikrofon“, „užijte si večer“).",
     "Nikdo se nepředstavuje dvakrát a nikdo, kdo už vysílal, neříká, že nastupuje.",
     "Kolegy oslovuj jen jejich jménem ve správném pádu (Zdendo, Martine, Josefe) — žádné přezdívky ani zdrobněliny. Nikdo neoslovuje sám sebe: kdo mluví, oslovuje kolegu, ne svoje jméno.",
-    "Písničku na konci uvádí ten, kdo ve vysílání zůstává nebo přichází — ne ten, kdo odchází (ledaže už nikdo nezůstává).",
+    "Kdo odchází, mluví jen jednou — v první replice. Po rozloučení už nic neříká, na nic nereaguje a písničku neuvádí (ledaže už nikdo nezůstává).",
     "Na konci zazní uvedení další písničky.",
   ].join(" ");
   let plan: string;
   if (stayTalk.length && arriveTalk.length && !leaving.length) {
     const s = stayTalk[0]!;
     const a = and(arriveTalk);
-    plan = `${s} už moderuje a do studia teď přichází ${a}. Pořadí: 1) ${s} ho krátce přivítá jménem. 2) ${a} poděkuje, pozdraví posluchače a řekne, že od teď moderují spolu (do kdy spolu — jen podle faktů). ${s} nekončí a neloučí se. Pak už jen krátká reakce a uvedení písničky.`;
+    plan = `${s} už moderuje a do studia teď přichází ${a}. Přesně 2 repliky: 1) ${s} ho krátce přivítá jménem. 2) ${a} poděkuje, pozdraví posluchače, řekne, že od teď moderují spolu (do kdy spolu — jen podle faktů), a uvede písničku. ${s} nekončí a neloučí se.`;
   } else if (stayTalk.length && leaveTalk.length && !arriving.length) {
     const s = stayTalk[0]!;
     const l = and(leaveTalk);
-    plan = `${l} končí směnu, ${s} zůstává ve vysílání. Pořadí: 1) ${l} řekne, že končí, poděkuje posluchačům a rozloučí se s ${s}. 2) ${s} mu poděkuje, rozloučí se s ním a řekne, jak to bude dál (podle faktů — třeba „teď jsem tu sám do tří, pak přijde Martin“). Na konci ${s} uvede písničku.`;
+    plan = `${l} končí směnu, ${s} zůstává ve vysílání. Přesně 2 repliky: 1) ${l} řekne, že končí, poděkuje posluchačům a rozloučí se s ${s} — to je jeho jediná replika, pak už nemluví. 2) ${s} mu poděkuje, řekne, jak to bude dál (podle faktů — třeba „teď jsem tu sám do tří, pak přijde Martin“), a uvede písničku.`;
   } else if (leaveTalk.length && arriveTalk.length) {
     const l = and(leaveTalk);
     const a = and(arriveTalk);
-    plan = `Střídání: ${l} končí, ${a} přichází. Pořadí: 1) ${l} poděkuje posluchačům a předá slovo ${a} (oslovením jménem). 2) ${a} poděkuje kolegovi, představí se posluchačům a řekne, do kdy bude ve vysílání. 3) krátké rozloučení. 4) ${a} uvede písničku.`;
+    plan = `Střídání: ${l} končí, ${a} přichází. Přesně 2 repliky: 1) ${l} poděkuje posluchačům, rozloučí se a předá slovo ${a} (oslovením jménem) — to je jeho jediná replika, pak už nemluví. 2) ${a} poděkuje kolegovi, představí se posluchačům, řekne, do kdy bude ve vysílání, a uvede písničku.`;
   } else if (leaveTalk.length) {
     const l = and(leaveTalk);
     plan = `${l} končí směnu a po něm už hraje jen hudba. ${l} poděkuje posluchačům, rozloučí se a uvede poslední písničku. Neříkej, kdo nebo co hraje dál.`;
@@ -851,6 +875,20 @@ function handoverBrief(
     ? ` Fakta o směnách (jediná správná — časy a kdo končí ber jen odsud): ${facts.lines.join(" ")}`
     : "";
   return `${plan}${factText} ${common}`;
+}
+
+/** Album, jen když se liší od názvu písničky („Song 2 z alba Song 2“ zní hloupě). */
+function albumOf(t: { title: string; album?: string | null } | null | undefined): string | null {
+  if (!t?.album) return null;
+  const k = (x: string) =>
+    x
+      .toLowerCase()
+      .replace(/\(.*?\)|\[.*?\]/g, "")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  const album = k(t.album);
+  const title = k(t.title);
+  return !album || album.startsWith(title) || title.startsWith(album) ? null : t.album;
 }
 
 /** Levenshteinova vzdálenost (krátká slova — zkomolená jména). */
@@ -1248,6 +1286,15 @@ const HOUR_ORD = [
   "desáté",
   "jedenácté",
 ];
+
+/** Hovorový čas v textu („půl sedmé“, „čtvrt na osm“, „je skoro šest“) — kontrola proti podkladům. */
+const TIME_PHRASE = new RegExp(
+  `(?<![\\p{L}])(?:půl (?:${HOUR_ORD.join("|")})|(?:tři čtvrtě|čtvrt) na (?:${HOUR_ACC.join("|")})|chvíli po (?:${HOUR_ORD.join("|")})|je skoro (?:${HOUR_NOM.join("|")})|(?<!(?:^|[^\\p{L}])(?:v|ve|do|od|po|před|kolem|až|o|na|za) )(?:${HOUR_NOM.join("|")})(?: hodin[ay]?)? (?:ráno|dopoledne|odpoledne|večer|v noci))(?![\\p{L}])`,
+  "giu",
+);
+export function timePhrases(text: string): string[] {
+  return [...text.toLowerCase().matchAll(TIME_PHRASE)].map((m) => m[0]);
+}
 
 function dayPart(hour: number): string {
   return hour < 5
@@ -2306,8 +2353,16 @@ export class AiDj {
         : [];
     if (special.length) this.pending.special = true;
     if (firstSnow) this.pending.snow = season;
+    // Retro pátek jen občas (ne v každém vstupu) a nikdy spolu s Hit hodiny.
+    const retro =
+      ctx.focus !== "quiz" &&
+      clock.weekday === 5 &&
+      !!ctx.next?.year &&
+      Number(ctx.next.year) < 2005 &&
+      Math.random() < 0.35;
     const hourKey = `${clock.date} ${clock.hour}`;
     const hitHour =
+      !retro &&
       ctx.focus === "music" &&
       !!ctx.next &&
       this.memory.hitHourSaid !== hourKey &&
@@ -2328,7 +2383,9 @@ export class AiDj {
     const age = ctx.next?.year
       ? Number(clock.date.slice(0, 4)) - Number(ctx.next.year)
       : 0;
-    const anniversary = age >= 5 && age % 5 === 0 && age <= 70 ? age : 0;
+    // U kvízu se rok ani stáří písničky neprozrazuje (odpověď až příště).
+    const anniversary =
+      ctx.focus !== "quiz" && age >= 5 && age % 5 === 0 && age <= 70 ? age : 0;
     const rated = this.log.filter((e) => e.rating);
     const liked = rated.filter((e) => e.rating === 1).slice(-3);
     const disliked = rated.filter((e) => e.rating === -1).slice(-2);
@@ -2352,6 +2409,12 @@ export class AiDj {
       ctx.focus !== "news" &&
       ctx.focus !== "hourly-news";
 
+    // Přesný čas jen u zpráv a „času a počasí“ (a občas jinde) — jinak by si ho model vymýšlel.
+    const sayTime =
+      ctx.focus === "hourly-news" ||
+      ctx.focus === "time-weather" ||
+      Math.random() < 0.2;
+    const timeNow = czechTime(clock.hour, clock.minute);
     const lines = [
       dialog
         ? `Rádio: ${ctx.stationName}. Moderují spolu dva: ${a!.name} a ${b!.name}.`
@@ -2368,23 +2431,21 @@ export class AiDj {
         : "Uprostřed směny: nepředstavuj se, nezdrav jako na začátku a neříkej, že jsi právě nastoupil, přebíráš nebo končíš — to se říká jen při předávce směny.",
       dialog
         ? [
-            `Formát: krátký rozhovor dvou moderátorů — ${short ? "jen 2 repliky, dohromady nejvýš 30 slov" : "4 repliky, dohromady nejvýš 60 slov"}. Každá replika na vlastním řádku ve tvaru „${a!.name}: text“ nebo „${b!.name}: text“, jiná jména nepoužívej.`,
+            `Formát: krátký rozhovor dvou moderátorů — přesně 2 repliky, každý mluví jednou, dohromady nejvýš ${ctx.focus === "handover" ? 45 : short ? 30 : 40} slov. Každá replika na vlastním řádku ve tvaru „${a!.name}: text“ nebo „${b!.name}: text“, jiná jména nepoužívej.`,
             ctx.focus === "news" || ctx.focus === "hourly-news"
-              ? `Tohle je vstup se ZPRÁVAMI: ${a!.name} přečte první zprávu vlastními slovy, ${b!.name} na ni krátce věcně zareaguje nebo přečte druhou. Zprávy musí v rozhovoru opravdu zaznít.`
+              ? `Tohle je vstup se ZPRÁVAMI: ${a!.name} přečte první zprávu vlastními slovy, ${b!.name} přečte druhou (nebo na první krátce věcně zareaguje) a uvede písničku. Zprávy musí v rozhovoru opravdu zaznít.`
               : null,
             ctx.focus === "handover"
               ? `Předávka směny: pořadí a obsah replik přesně podle zaměření níže (kdo začíná, kdo koho vítá nebo s kým se loučí). Kolegové se oslovují jménem a reagují na sebe.`
               : `Nejdřív si v duchu vyber JEDEN konkrétní háček k rozhovoru (podle zaměření níže): třeba pocit z písničky, co dohrála, denní doba a co lidi zrovna dělají, počasí, nebo otázka na kolegu. Celý rozhovor je jen o něm.`,
             ctx.focus === "handover"
               ? null
-              : short
-                ? `Struktura: 1) ${a!.name} řekne postřeh nebo položí otázku k háčku. 2) ${b!.name} na to přímo odpoví a plynule z toho uvede další písničku.`
-                : `Struktura: 1) ${a!.name} řekne postřeh nebo položí otázku k háčku — NE uvedení písničky. 2) ${b!.name} na to přímo odpoví a přidá svůj názor. 3) ${a!.name} krátce zareaguje (souhlas, vtip, oponování). 4) ${b!.name} z toho plynule uvede další písničku.`,
+              : `Struktura: 1) ${a!.name} řekne to hlavní podle zaměření (postřeh, otázku, pozvánku, vzkaz…) — NE uvedení písničky. 2) ${b!.name} na to přímo odpoví a plynule z toho uvede další písničku. Víc replik ne.`,
             `Každá replika musí dávat smysl jako odpověď na tu předchozí — kdo ji čte samostatně, pozná, na co reaguje. Žádná replika nesmí být obecná vata („ty hity se povedly“).`,
             `Mluv jen o písničkách a interpretech z podkladů — žádné jiné skladby ani alba si nevymýšlej. Nevymýšlej si ani společné zážitky („včera jsme…“).`,
             `Rozhovor končí uvedením další písničky (interpret a název) — ne otázkou a ne „co si dáme dál“.`,
             `Krátké reakce („Jo jo.“, „No jasně!“, „Fakt?“) a smích [laughs] / [chuckles] jsou fajn, když sedí.`,
-            `Příklad (jiný obsah, jen ukázka toku): „${a!.name}: Je pátek večer, co, už máš plány na víkend?\n${b!.name}: Já? Gauč a deka. Venku jsou dva stupně, nikam nejdu.\n${a!.name}: [laughs] To zní jako dobrej plán.\n${b!.name}: Tak ať se na tom gauči aspoň hejbe — tady je Avicii a Levels.“`,
+            `Příklad (jiný obsah, jen ukázka toku): „${a!.name}: Je pátek večer, co, už máš plány na víkend?\n${b!.name}: [laughs] Gauč a deka, venku jsou dva stupně. Tak ať se aspoň něco hejbe — tady je Avicii a Levels.“`,
           ]
             .filter(Boolean)
             .join("\n")
@@ -2410,7 +2471,7 @@ export class AiDj {
           vibe: "nálada — krátký osobní komentář k denní době, dni nebo písničce, pak uvedení další",
           invite:
             "pozvi posluchače, ať si na webu rádia přejí písničku nebo pošlou vzkaz či hlasovku do studia",
-          quiz: "hudební kvíz — zeptej se posluchačů, z kterého roku je písnička, která teď začíná. Rok NEPROZRAZUJ, odpověď zazní v příštím vstupu",
+          quiz: "hudební kvíz — zeptej se posluchačů, z kterého roku je písnička, která teď začíná. Rok NEPROZRAZUJ a nenapovídej (žádné „letos slaví … let“, žádné tipy na rok ani desetiletí) — odpověď zazní v příštím vstupu. U rozhovoru se ptá jeden a druhý jen přizvukuje (třeba že to ví, ale neřekne) a uvede písničku. Tipy ať lidi posílají jako vzkaz na webu rádia",
           "hourly-news":
             "zprávy v celou hodinu — začni oznámením hodiny, pak jedna až dvě zprávy",
           handover: ctx.handover
@@ -2433,7 +2494,7 @@ export class AiDj {
           "daily-summary":
             "denní shrnutí — krátce a vesele shrň dnešek v rádiu podle statistik v podkladech: nejvýš 3 čísla (třeba kolik písniček hrálo, kdo hrál nejčastěji a kolik přání přišlo), každé v jednoduché větě („Nejčastěji hrál Scooter, devětkrát.“), žádné výčty. Poděkuj posluchačům a uveď písničku. Nejvýš 4 krátké věty, jen čísla z podkladů",
           request:
-            "přání posluchače — písnička, která začíná, je přání (jméno a vzkaz jsou v podkladech u „Teď začíná“). Poděkuj tomu, kdo si ji přál, jménem (bez jména řekni „jeden z vás“). Když je vzkaz slušný, krátce na něj zareaguj nebo ho převyprávěj vlastními slovy, klidně oceň volbu písničky. Na konci písničku uveď",
+            "přání posluchače — písnička, která začíná, je přání (jméno a vzkaz jsou v podkladech u „Teď začíná“). Poděkuj tomu, kdo si ji přál, jménem (bez jména řekni „jeden z vás“). Vzkaz: když je slušný a srozumitelný, řekni ho krátce jako vzkaz od posluchače („Lojza píše, že je zrovna za volantem“); když mu nerozumíš, vynech ho. K vzkazu nic nedomýšlej, nehodnoť ho a nepřekrucuj. Nemluv za posluchače („chtěl bych si zahrát“ je jeho věta, ne tvoje). Na konci písničku uveď",
           "voice-reply":
             "krátce a mile odpověz na hlasovku posluchače, která právě zazněla (poděkuj, reaguj na to, co řekl)",
         }[ctx.focus]
@@ -2441,11 +2502,11 @@ export class AiDj {
       special.length
         ? `Dnes: ${special.join(", ")} — zmiň to krátce, pokud se to aspoň trochu hodí.`
         : null,
-      clock.weekday === 5 && ctx.next?.year && Number(ctx.next.year) < 2005
-        ? `Rubrika Retro pátek: písnička, která začíná, je z roku ${ctx.next.year} — uveď ji jako součást Retro pátku.`
+      retro
+        ? `Rubrika Retro pátek: písnička, která začíná, je z roku ${ctx.next!.year} — uveď ji jako součást rubriky Retro pátek (název rubriky neskloňuj: „v rubrice Retro pátek“, „na Retro pátek“).`
         : null,
       hitHour
-        ? "Rubrika Hit hodiny: uveď další písničku jako Hit hodiny."
+        ? "Rubrika Hit hodiny: další písničku uveď jako Hit hodiny („a teď Hit hodiny: …“) — jen jednou, název rubriky neskloňuj."
         : null,
       quiz && ctx.focus !== "quiz"
         ? `Kvíz: minule ses ptal, z kterého roku je ${quiz.artist} — ${quiz.title}. Prozraď odpověď: rok ${quiz.year}.`
@@ -2472,7 +2533,7 @@ export class AiDj {
       ctx.justPlayed?.genre && ctx.next?.genre
         ? ctx.justPlayed.genre !== ctx.next.genre ||
           Math.abs((ctx.justPlayed.energy ?? 3) - (ctx.next.energy ?? 3)) >= 2
-          ? `Styl se mění: dohrálo ${ctx.justPlayed.genre} (${energyWord(ctx.justPlayed.energy)}), začíná ${ctx.next.genre} (${energyWord(ctx.next.energy)}) — krátce to okomentuj lidsky („teď trochu zvolníme“, „a přidáme plyn“). Žádná čísla ani stupnice energie neříkej.`
+          ? `Styl se mění: dohrálo ${ctx.justPlayed.genre} (${energyWord(ctx.justPlayed.energy)}), začíná ${ctx.next.genre} (${energyWord(ctx.next.energy)}) — smíš to krátce okomentovat pocitem („teď trochu zvolníme“, „a přidáme plyn“). Názvy žánrů nevyjmenovávej („dohrálo house, začíná techno“ zní jako robot) a čísla ani stupnice energie neříkej.`
           : null
         : ctx.justPlayed && ctx.next
           ? "Styl: když se mezi písničkou, co dohrála, a tou další hodně mění žánr nebo tempo (třeba z techna do rocku nebo z pecky do balady), krátce to okomentuj („teď trochu zvolníme“, „a přidáme plyn“). Když je to podobné, nic neříkej."
@@ -2513,13 +2574,15 @@ export class AiDj {
       // Přesný čas jen u tématu „čas a počasí“ (a občas jinde) — jinak by ho říkala pokaždé.
       ctx.focus === "hourly-news"
         ? `Hodina: začni přesně větou „${czechTime(clock.hour, clock.minute)}, tady jsou zprávy.“`
-        : ctx.focus === "time-weather" || Math.random() < 0.2
+        : sayTime
           ? `Čas (až vstup zazní; řekni ho přesně takhle, nic nepřepočítávej): „${czechTime(clock.hour, clock.minute)}“, ${["neděle", "pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota"][clock.weekday]}.`
           : `Den: ${["neděle", "pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota"][clock.weekday]}, ${clock.hour < 10 ? "ráno" : clock.hour < 12 ? "dopoledne" : clock.hour < 17 ? "odpoledne" : clock.hour < 22 ? "večer" : "noc"} (přesný čas neříkej).`,
       namedayFresh
         ? `Svátek má: ${nameday} (zmiň jen pokud se to hodí k zaměření).`
         : null,
-      weatherFresh ? `Počasí: ${weather}.` : null,
+      weatherFresh
+        ? `Počasí (jen data — převyprávěj lidsky jednou větou, bez „km/h“, „°C“ a dvojteček, třeba „venku je kolem pěti stupňů a zataženo“): ${weather}.`
+        : null,
       // Celá ČR: u tématu počasí; večer (od 17 h) i výhled na zítřek.
       cz && (ctx.focus === "time-weather" || (evening && weatherFresh))
         ? `Počasí po republice teď: ${cz.now}.${
@@ -2542,13 +2605,13 @@ export class AiDj {
             : "") +
           "."
         : null,
-      [ctx.justPlayed, ctx.next].some((t) => t?.album || t?.year)
+      [ctx.justPlayed, ctx.next].some((t) => albumOf(t) || t?.year)
         ? `Info z knihovny (fakt smíš použít, max. jeden a jen když se hodí — nic dalšího si nedomýšlej; rok řekni jako číslo, nepřepočítávej na „loni“): ${[
-            ctx.justPlayed && (ctx.justPlayed.album || ctx.justPlayed.year)
-              ? `dohrálo z ${[ctx.justPlayed.album && `alba ${ctx.justPlayed.album}`, ctx.justPlayed.year && `roku ${ctx.justPlayed.year}`].filter(Boolean).join(", ")}`
+            ctx.justPlayed && (albumOf(ctx.justPlayed) || ctx.justPlayed.year)
+              ? `${ctx.justPlayed.artist} — ${ctx.justPlayed.title} (dohrálo): ${[albumOf(ctx.justPlayed) && `album ${albumOf(ctx.justPlayed)}`, ctx.justPlayed.year && `rok ${ctx.justPlayed.year}`].filter(Boolean).join(", ")}`
               : null,
-            ctx.next && (ctx.next.album || ctx.next.year)
-              ? `začíná z ${[ctx.next.album && `alba ${ctx.next.album}`, ctx.next.year && `roku ${ctx.next.year}`].filter(Boolean).join(", ")}`
+            ctx.next && (albumOf(ctx.next) || ctx.next.year)
+              ? `${ctx.next.artist} — ${ctx.next.title} (začíná): ${[albumOf(ctx.next) && `album ${albumOf(ctx.next)}`, ctx.next.year && `rok ${ctx.next.year}`].filter(Boolean).join(", ")}`
               : null,
           ]
             .filter(Boolean)
@@ -2568,18 +2631,32 @@ export class AiDj {
         ? `Tvoje poslední vstupy s pražským časem (neopakuj z nich fakta, zprávy, stupně, vtipy, obraty ani začátek; jen výjimečně můžeš krátce navázat, třeba „jak jsem říkal před chvílí…“):\n${recent.map((r) => `- ${r}`).join("\n")}`
         : null,
       emotions
-        ? `Emoce: použij 2 až 3 tagy v hranatých závorkách (aspoň jeden vždy), ať vstup zní živě, které hlas zahraje (${EMOTION_TAGS.map((t) => `[${t}]`).join(", ")}), např. „[excited] Tohle je pecka!“. Tag patří PŘED větu, kterou má zabarvit — nikdy na konec. Střídej je, ne pořád stejný. Tón ber podle písničky, která začíná: klidná, pomalá nebo smutná → [calm], [warmly], [whispers]; energická, taneční nebo pecka → [excited], [happy].`
+        ? `Emoce: použij 2 až 3 tagy v hranatých závorkách (aspoň jeden vždy), ať vstup zní živě, které hlas zahraje (${EMOTION_TAGS.map((t) => `[${t}]`).join(", ")}). Tag patří PŘED větu, kterou má zabarvit — nikdy na konec. Střídej je, ne pořád stejný. Tón ber podle písničky, která začíná: klidná, pomalá nebo smutná → [calm], [warmly], [whispers]; energická, taneční nebo pecka → [excited], [happy].`
         : null,
     ].filter(Boolean);
 
     const prompt = `Podklady:\n${lines.join("\n")}\n\nNapiš jeden ${dialog ? "rozhovor" : "vstup"}.`;
-    const ask = (p: string, system?: string) =>
+    // `other`: poslední pokus jiným modelem (ten první psal pořád s chybami).
+    const ask = (p: string, system?: string, other = false) =>
       textProvider() === "nvidia"
-        ? this.writeWithNvidia(p, urgent, system)
+        ? this.writeWithNvidia(
+            p,
+            urgent,
+            system,
+            other ? this.nvidiaWorking : null,
+          )
         : this.writeWithClaude(p, system);
     // Uvažující modely (GLM, DeepSeek…) občas vrátí úvahu v <think> — do éteru nepatří.
     const unthink = (s: string) =>
-      s.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      s
+        .replace(/<think>[\s\S]*?<\/think>/g, "")
+        .trim()
+        // Model občas zopakuje popisek ze zadání („Vstup k opravě:“, „Opravený text:“).
+        .replace(
+          /^(?:(?:vstup|rozhovor|text)(?: k opravě)?|opravený (?:text|vstup|rozhovor)|oprava|verze \d)\s*:\s*/i,
+          "",
+        )
+        .trim();
     let body = "";
     // Zakázané fráze → napsat znovu (nejvýš 3 pokusy, pak se vezme poslední).
     // Rozhovor: písnička patří až na konec, ne na začátek, a nekončí otázkou.
@@ -2628,6 +2705,78 @@ export class AiDj {
         : text.replace(/\[[^\]]{1,24}\]/g, "").length;
       if (longest > limit)
         hits.push(`moc dlouhé (${longest} znaků, max ${limit}) — zkrať`);
+      if (ctx.focus === "quiz" && ctx.next?.year) {
+        const y = ctx.next.year;
+        if (
+          text.includes(y) ||
+          /slaví|\d+\s+let\b|(deset|dvacet|třicet|čtyřicet|padesát|šedesát|let)\s+let\b|devadesát|osmdesát|sedmdesát|desátých|tých let/i.test(
+            text,
+          )
+        )
+          hits.push("kvíz prozrazuje rok nebo stáří písničky");
+      }
+      if (dialog) {
+        // „Josef: …jak běží Josefova směna“ — moderátor nemluví o sobě ve třetí osobě.
+        for (const line of text.split(/\n+/)) {
+          const m = /^([^:\n]{1,40}):\s*(.*)$/.exec(line.trim());
+          if (!m) continue;
+          const who = ctx.hosts.find((h) => fold(h.name) === fold(m[1]!.trim()));
+          if (!who) continue;
+          const stem = fold(who.name).slice(0, Math.max(3, who.name.length - 1));
+          if (stem.length >= 4 && fold(m[2]!).match(/\p{L}+/gu)?.some((w) => w.startsWith(stem)))
+            hits.push(`${who.name} mluví sám o sobě jménem`);
+        }
+      }
+      {
+        const said = timePhrases(text);
+        if (said.length && !sayTime)
+          hits.push(`říká čas („${said[0]}“), i když ho nemá — čas vynech`);
+        else if (said.some((t) => !timeNow.toLowerCase().includes(t)))
+          hits.push(`špatný čas („${said.find((t) => !timeNow.toLowerCase().includes(t))}“ — je „${timeNow}“)`);
+      }
+      if (
+        ctx.justPlayed?.genre &&
+        ctx.next?.genre &&
+        fold(ctx.justPlayed.genre) !== fold(ctx.next.genre) &&
+        [ctx.justPlayed.genre, ctx.next.genre].every((g) => fold(text).includes(fold(g)))
+      )
+        hits.push("vyjmenovává žánry („dohrálo X, začíná Y“) — řekni to pocitem");
+      // U „času a počasí“ a zpráv musí čas zaznít přesně (ne „je páté hodiny“).
+      if (
+        (ctx.focus === "time-weather" || ctx.focus === "hourly-news") &&
+        !fold(text).includes(fold(timeNow.replace(/^(je|jsou) /i, "")))
+      )
+        hits.push(`čas neřekl přesně — má zaznít „${timeNow}“`);
+      for (const t of [ctx.next, ctx.justPlayed]) {
+        for (const tok of t?.artist.match(/\b(?:MC|DJ)\b/g) ?? []) {
+          if (fold(text).includes(fold(t!.title).slice(0, 6)) && !text.includes(tok) && !fold(text).includes(fold(t!.artist).slice(0, 4)))
+            hits.push(`zkomolený interpret — řekni přesně „${t!.artist}“`);
+        }
+      }
+      if (retro && /retro/i.test(text) && !/Retro pátek/i.test(text))
+        hits.push("zkomolený název rubriky — má být přesně „Retro pátek“");
+      if (hitHour && !/hit hodiny/i.test(text))
+        hits.push("chybí rubrika „Hit hodiny“");
+      if (/\bpeck/.test(fold(text)) && this.log.slice(-5).some((e) => /\bpeck/.test(fold(e.text))))
+        hits.push("ohraná fráze „pecka“ — řekni to jinak");
+      if (ctx.focus !== "handover" && /jen hudba|už jen hudba|bez moderátor/i.test(text))
+        hits.push("„jen hudba“ mimo předávku (moderátor dál vysílá)");
+      if (/km\/h|°|\b[A-ZÁ-Ž][\p{L}]+: teď\b/u.test(text))
+        hits.push("počasí opsané z dat (km/h, °C) — řekni to lidsky");
+      if (/k opravě|opravený text/i.test(text)) hits.push("popisek ze zadání v textu");
+      {
+        // Stejný začátek jako nedávné vstupy („Tohle je pecka!“ pořád dokola).
+        const opener = (t: string) =>
+          (fold(cleanTags(t, false).replace(/^[^:\n]{1,40}:\s*/, "")).match(/\p{L}+/gu) ?? [])
+            .slice(0, 3)
+            .join(" ");
+        const mine = opener(text);
+        if (
+          mine.split(" ").length === 3 &&
+          this.log.slice(-8).some((e) => opener(e.text) === mine)
+        )
+          hits.push(`stejný začátek jako nedávno („${mine}“)`);
+      }
       if (
         ctx.focus !== "handover" &&
         /nastupuj|nastoupil|přebírám|přebírá|začínám (svou |mou )?směnu|končím směnu|loučím se|předávám/i.test(
@@ -2648,6 +2797,19 @@ export class AiDj {
           new Date(ctx.handover?.at ?? ctx.airAt ?? Date.now()),
         );
         const staying = ctx.handover.staying ?? [];
+        // Kdo odchází, mluví jen na začátku — po rozloučení už nic neříká.
+        const order = text
+          .split(/\n+/)
+          .map((l) => /^\s*([^:\n]{2,24}):/.exec(l)?.[1]?.trim())
+          .filter((x): x is string => !!x);
+        for (const l of ctx.handover.leaving) {
+          const line = text.split(/\n+/).find((x) => x.trim().startsWith(`${l}:`)) ?? "";
+          if (/vrátím se|vracím se|uvidíme se|zase zítra|zítra ráno/i.test(line) && !facts.returnsLater[l])
+            hits.push(`${l} si vymýšlí, kdy se vrátí — to ve faktech není`);
+          const firstOther = order.findIndex((w) => w !== l);
+          if (firstOther >= 0 && order.lastIndexOf(l) > firstOther)
+            hits.push(`${l} se už rozloučil, ale pak mluví dál`);
+        }
         for (const raw of text.split(/\n+/)) {
           const m = /^\s*([^:\n]{2,24}):\s*(.*)$/.exec(raw);
           const who = m?.[1]?.trim();
@@ -2668,6 +2830,11 @@ export class AiDj {
         }
         const word = (w: string | null) =>
           w?.replace(/^do /, "").split(" ")[0] ?? "";
+        if (facts.alone?.until && ctx.hosts.some((h) => h.name === facts.alone!.name)) {
+          const own = text.split(/\n+/).find((x) => x.trim().startsWith(`${facts.alone!.name}:`)) ?? "";
+          if (!fold(own).includes(fold(word(facts.alone.until))))
+            hits.push(`${facts.alone.name} neřekl, jak to bude dál (je tu sám ${facts.alone.until})`);
+        }
         const aloneM = /\bsám do (\p{L}+)/iu.exec(text);
         if (
           aloneM &&
@@ -2806,19 +2973,23 @@ export class AiDj {
       if (replies.length > 2 && mentionsNext(replies[0]!))
         hits.push("písnička je uvedená hned na začátku");
       if (/\?\s*$/.test(last)) hits.push("rozhovor končí otázkou");
+      if (replies.length > 2) hits.push(`víc než 2 repliky (${replies.length}) — zkrať na 2`);
       return hits;
     };
     // Tři verze naráz (u „Pustit teď“ jedna, ať je to rychle) → vyhodí se ty s chybou → model vybere nejpřirozenější.
     const variants = urgent ? 1 : 3;
     let lastIssues: string[] = [];
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const ATTEMPTS = 3;
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
       const extra =
         attempt && body
           ? `\n\nPozor, minulá verze porušila pravidla (${lastIssues.join(", ")}) — napiš to jinak.`
           : "";
       const drafts = (
         await Promise.allSettled(
-          Array.from({ length: variants }, () => ask(prompt + extra)),
+          Array.from({ length: variants }, () =>
+            ask(prompt + extra, undefined, attempt === ATTEMPTS - 1),
+          ),
         )
       )
         .filter(
@@ -2841,8 +3012,20 @@ export class AiDj {
       ];
       const good = drafts.filter((d) => !issues(d).length);
       if (!good.length) {
-        body = drafts[0]!;
+        // Ta s nejmenším počtem chyb (ne náhodně první).
+        body = [...drafts].sort((x, y) => issues(x).length - issues(y).length)[0]!;
         lastIssues = issues(body);
+        // Po posledním pokusu: drobnosti (opakovaný obrat, délka) projdou, ale nesmysly,
+        // neexistující slova a nepravdy do éteru nepustit — radši ticho.
+        if (attempt === ATTEMPTS - 1) {
+          const soft = /^(opakuje obraty|ohraná fráze|moc dlouhé|stejný začátek|víc než 2 repliky)/;
+          const hard = lastIssues.filter((i) => !soft.test(i));
+          if (hard.length) {
+            radioLog("🤖", c.yellow(`AI vstup vynechán — po ${ATTEMPTS} pokusech pořád chyby (${hard.join(", ")})`));
+            throw new Error(`Vstup se nepovedl napsat bez chyb (${hard.slice(0, 3).join(", ")}).`);
+          }
+          break;
+        }
         radioLog(
           "🤖",
           c.dim(`AI vstup zamítnut (${lastIssues.join(", ")}) — znovu`),
@@ -2876,13 +3059,23 @@ export class AiDj {
         ),
       );
       const names = (s: string) => (s.match(/^[^:\n]{1,40}:/gm) ?? []).length;
+      // Korektor nesmí přidat překlep („pětnaáct“) — nová slova projdou slovníkem.
+      const before = new Set(wordsToCheck(body, prompt));
+      const added = wordsToCheck(fixed, prompt).filter((w) => !before.has(w));
+      const typos = added.length
+        ? await unknownWords(added).catch(() => [] as string[])
+        : [];
       if (
         fixed.length > body.length * 0.5 &&
         fixed.length < body.length * 1.5 &&
         (!dialog || names(fixed) === names(body)) &&
-        !problems(fixed).length
+        !problems(fixed).length &&
+        !typos.length &&
+        !looksGarbled(fixed)
       ) {
         body = fixed;
+      } else if (typos.length) {
+        radioLog("🤖", c.dim(`Korektor zamítnut (překlep: ${typos.join(", ")})`));
       }
     } catch (err) {
       console.warn(
@@ -2974,6 +3167,7 @@ export class AiDj {
     prompt: string,
     urgent: boolean,
     system = SYSTEM_PROMPT,
+    avoid: string | null = null,
   ): Promise<string> {
     const models = [
       ...new Set(
@@ -2983,7 +3177,7 @@ export class AiDj {
           ...NVIDIA_MODELS,
         ].filter((m): m is string => !!m),
       ),
-    ];
+    ].filter((m) => m !== avoid);
     // „Teď“ se musí vejít i s namluvením do limitu studia; během písničky je času víc.
     // Vstup se chystá na pozadí (i „Pustit teď“), takže se může čekat déle.
     const deadline = Date.now() + (urgent ? 100_000 : 150_000);
@@ -3063,6 +3257,9 @@ export class AiDj {
     const content = choice?.message?.content ?? "";
     if (!content.trim() && choice?.finish_reason === "length")
       throw new Error("došel limit na úvahu");
+    // Rozbitý endpoint občas vrací směs písem („.тин(c.、한多“) → zkusit jiný model.
+    if (looksGarbled(content.replace(/<think>[\s\S]*?<\/think>/g, ""), prompt))
+      throw new Error("nesmyslný text (rozbitý model)");
     return content;
   }
 

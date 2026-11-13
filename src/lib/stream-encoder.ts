@@ -34,7 +34,8 @@ function adtsFrameLength(b: Buffer, i: number): number {
   return len >= 7 ? len : 0;
 }
 
-export type StreamFormat = "mp3" | "aac";
+/** mp3 = plná kvalita, aac = střední, aac-lo = úsporná pro slabý signál. */
+export type StreamFormat = "mp3" | "aac" | "aac-lo";
 
 /** Skládá výstup enkodéru do celých rámců (posluchač se tak vždy chytí na hranici). */
 class FrameSplitter {
@@ -85,6 +86,25 @@ export function isAacEnabled(): boolean {
   return process.env.RADIO_AAC !== "0";
 }
 
+/** Úsporná kvalita pro slabý signál (výchozí 48 kbps). */
+export function getAacLowBitrateKbps(): number {
+  const raw = Number(process.env.RADIO_AAC_LOW_BITRATE ?? 48);
+  if (!Number.isFinite(raw) || raw <= 0) return 48;
+  return Math.min(Math.max(Math.floor(raw), 24), 96);
+}
+
+export function isAacLowEnabled(): boolean {
+  return isAacEnabled() && process.env.RADIO_AAC_LOW !== "0";
+}
+
+export function formatBitrateKbps(format: StreamFormat): number {
+  return format === "aac"
+    ? getAacBitrateKbps()
+    : format === "aac-lo"
+      ? getAacLowBitrateKbps()
+      : Math.floor(getStreamBitrate() / 1000);
+}
+
 /**
  * Jeden trvalý enkodér na celé vysílání: PCM z mixeru → MP3/AAC → posluchači.
  * Žádné přepínání procesů mezi skladbami = žádné mezery, cvaknutí ani skoky bitrate.
@@ -101,14 +121,12 @@ export class StreamEncoder {
     readonly format: StreamFormat = "mp3",
   ) {
     this.splitter = new FrameSplitter(
-      format === "aac" ? adtsFrameLength : mp3FrameLength,
+      format === "mp3" ? mp3FrameLength : adtsFrameLength,
     );
   }
 
   get bitrateKbps(): number {
-    return this.format === "aac"
-      ? getAacBitrateKbps()
-      : Math.floor(getStreamBitrate() / 1000);
+    return formatBitrateKbps(this.format);
   }
 
   start(): void {
@@ -125,7 +143,7 @@ export class StreamEncoder {
         "-f", "s16le", "-ar", String(SAMPLE_RATE), "-ac", String(CHANNELS),
         "-i", "pipe:0",
         "-af", "alimiter=limit=0.97:attack=4:release=60:level=0",
-        ...(this.format === "aac"
+        ...(this.format !== "mp3"
           ? ["-c:a", "aac", "-b:a", `${kbps}k`, "-ar", String(SAMPLE_RATE), "-f", "adts"]
           : [
               "-c:a", "libmp3lame",

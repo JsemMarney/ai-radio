@@ -9,9 +9,10 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const origin = requestUrl.origin;
-  const aac = requestUrl.searchParams.get("format") === "aac";
+  const fmt = requestUrl.searchParams.get("format");
+  const aac = fmt === "aac" || fmt === "lo";
   const withFormat = (u: string) =>
-    aac ? `${u}${u.includes("?") ? "&" : "?"}format=aac` : u;
+    aac ? `${u}${u.includes("?") ? "&" : "?"}format=${fmt}` : u;
 
   // Icecast vysílá jen MP3 — AAC jde vždy přes broker.
   if (isIcecastEnabled() && !aac) {

@@ -1,6 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
-  <circle cx="60" cy="60" r="58" fill="#e5322d"/>
-  <circle cx="60" cy="60" r="7" fill="#f4ece2"/>
-  <path d="M42 42a25 25 0 0 0 0 36M78 42a25 25 0 0 1 0 36" stroke="#f4ece2" stroke-width="6" stroke-linecap="round"/>
-  <path d="M30 30a42 42 0 0 0 0 60M90 30a42 42 0 0 1 0 60" stroke="#f4ece2" stroke-width="6" stroke-linecap="round" opacity="0.55"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Miss Radio: „M“, nad ním vysílací tečka a signál. -->
+  <rect width="512" height="512" rx="116" fill="#E5202E"/>
+  <g id="mark">
+    <path d="M136 384V176l120 132 120-132v208" stroke="#FFF6F2" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="256" cy="150" r="34" fill="#FFB547"/>
+    <path d="M196 116a84 84 0 0 1 120 0" stroke="#FFF6F2" stroke-width="20" stroke-linecap="round" opacity="0.6"/>
+  </g>
 </svg>

@@ -14,18 +14,18 @@ export function StationHeader({
       <img
         src={config.logoUrl}
         alt=""
-        className={`${compact ? "h-9 w-9" : "h-11 w-11"} shrink-0 rounded-full`}
+        className={`${compact ? "h-8 w-8 sm:h-9 sm:w-9" : "h-11 w-11"} shrink-0`}
       />
       <div className="min-w-0">
         <p
-          className={`truncate font-[family-name:var(--font-display)] font-semibold uppercase leading-none tracking-wide text-[var(--ink)] ${
-            compact ? "text-xl" : "text-2xl sm:text-3xl"
+          className={`truncate font-[family-name:var(--font-display)] font-extrabold uppercase leading-none tracking-tight text-[var(--ink)] ${
+            compact ? "text-lg sm:text-xl" : "text-2xl sm:text-3xl"
           }`}
         >
           {config.name}
         </p>
         {config.tagline ? (
-          <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
+          <p className="mt-1 truncate font-[family-name:var(--font-mono)] text-[10px] uppercase tracking-wider text-[var(--ink-muted)] sm:text-[11px]">
             {config.tagline}
           </p>
         ) : null}
@@ -133,27 +133,19 @@ export function NowPlaying({
 }) {
   const title = track?.title ?? placeholder;
   return (
-    <div className="glass relative overflow-hidden rounded-3xl">
-      {track?.thumbnail ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={track.thumbnail}
-          alt=""
-          aria-hidden
-          className="pointer-events-none absolute inset-0 h-full w-full scale-125 object-cover opacity-30 blur-3xl saturate-150"
-        />
-      ) : null}
-      <div className="relative grid gap-5 p-5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:gap-8 sm:p-8 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
+    <div className="glass relative overflow-hidden rounded-md">
+      {/* Mobil: malý obal vedle názvu, tlačítka pod tím na celou šířku. Počítač: velký obal vlevo. */}
+      <div className="relative grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-x-4 gap-y-4 p-4 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:gap-x-8 sm:gap-y-6 sm:p-8 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
         <Cover
           src={track?.thumbnail}
           size="lg"
-          className="mx-auto max-w-[15rem] rounded-2xl shadow-[0_24px_60px_-18px_rgb(var(--tint)/0.65)] ring-1 ring-white/10 sm:max-w-none"
+          className="w-full rounded-sm sm:row-span-2"
         />
-        <div className="flex min-w-0 flex-col justify-center">
+        <div className="flex min-w-0 flex-col justify-center sm:self-end">
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <div className="flex items-center gap-2">
               {track?.requested ? (
-                <span className="rounded-full bg-[var(--accent)]/15 px-2 py-0.5 text-[11px] font-semibold text-[var(--accent-soft)]">
+                <span className="border border-[var(--accent)] px-1.5 py-0.5 font-[family-name:var(--font-mono)] text-[10px] font-medium uppercase tracking-wider text-[var(--accent-soft)]">
                   na přání
                 </span>
               ) : null}
@@ -161,17 +153,17 @@ export function NowPlaying({
             {aside}
           </div>
           <h1
-            className={`text-gradient mt-3 font-extrabold leading-tight tracking-tight ${
-              title.length > 34 ? "text-2xl sm:text-3xl" : "text-3xl sm:text-4xl"
+            className={`mt-1 line-clamp-3 font-extrabold leading-[1.05] tracking-tight text-[var(--ink)] sm:mt-3 ${
+              title.length > 34 ? "text-lg sm:text-3xl" : "text-xl sm:text-4xl"
             }`}
           >
             {title}
           </h1>
           {track ? (
-            <p className="mt-1 text-base font-medium text-[var(--ink)]/85 sm:text-lg">{track.artist}</p>
+            <p className="mt-0.5 truncate text-sm font-medium text-[var(--ink)]/85 sm:mt-1 sm:text-lg">{track.artist}</p>
           ) : null}
-          {children}
         </div>
+        {children ? <div className="col-span-2 min-w-0 sm:col-span-1 sm:col-start-2 sm:self-start">{children}</div> : null}
       </div>
       {track?.dedication ? (
         <div className="relative border-t border-[var(--line)] px-5 pb-5 sm:px-8 sm:pb-6">
@@ -194,7 +186,7 @@ export function DedicationNote({
   title?: string;
 }) {
   return (
-    <figure className="mt-6 rounded-2xl border border-[var(--line)] bg-[var(--bg-panel)]/70 px-[18px] py-4">
+    <figure className="mt-6 rounded-md border-l-2 border-[var(--accent)] bg-[var(--bg-panel)] px-[18px] py-4">
       {title ? (
         <p className="mb-2 font-[family-name:var(--font-display)] text-xs font-semibold uppercase tracking-[0.14em] text-[var(--accent-soft)]">
           {title}
@@ -232,7 +224,7 @@ export function ListenButton({
     <button
       type="button"
       onClick={onToggle}
-      className="btn-glow inline-flex h-12 items-center gap-3 rounded-full pl-4 pr-6 font-[family-name:var(--font-display)] text-base font-semibold uppercase tracking-wider text-[var(--ink)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+      className="btn-glow inline-flex h-12 items-center gap-3 rounded-md pl-4 pr-6 font-[family-name:var(--font-display)] text-sm font-bold uppercase tracking-wider text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] w-full justify-center sm:w-auto sm:justify-start"
       aria-label={playing ? "Zastavit" : "Poslouchat živě"}
     >
       {playing ? (
@@ -259,11 +251,11 @@ export function VolumeControl({
   onToggleMute: () => void;
 }) {
   return (
-    <div className="flex w-full max-w-[220px] items-center gap-3">
+    <div className="group/vol flex items-center">
       <button
         type="button"
         onClick={onToggleMute}
-        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[var(--ink)] transition-colors hover:bg-[var(--ink)]/10"
+        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-[var(--ink)] transition-colors hover:bg-[var(--ink)]/10"
         aria-label={volume > 0 ? "Ztlumit" : "Zapnout zvuk"}
       >
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -278,18 +270,21 @@ export function VolumeControl({
           )}
         </svg>
       </button>
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step={0.01}
-        value={volume}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="broadcast-range flex-1"
-        style={{ "--fill": `${Math.round(volume * 100)}%` } as CSSProperties}
-        aria-label="Hlasitost"
-        aria-valuetext={`${Math.round(volume * 100)} %`}
-      />
+      {/* Posuvník vyjede, až na reproduktor najedeš myší (nebo na něj skočíš klávesnicí). */}
+      <div className="flex w-0 items-center overflow-hidden opacity-0 transition-[width,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/vol:w-36 group-hover/vol:opacity-100 group-focus-within/vol:w-36 group-focus-within/vol:opacity-100 motion-reduce:transition-none">
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={volume}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className="broadcast-range mx-2 my-3 w-32 shrink-0"
+          style={{ "--fill": `${Math.round(volume * 100)}%` } as CSSProperties}
+          aria-label="Hlasitost"
+          aria-valuetext={`${Math.round(volume * 100)} %`}
+        />
+      </div>
     </div>
   );
 }

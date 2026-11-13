@@ -102,6 +102,8 @@ import {
 import {
   getAacBitrateKbps,
   isAacEnabled,
+  isAacLowEnabled,
+  getAacLowBitrateKbps,
   StreamEncoder,
   type StreamFormat,
 } from "@/lib/stream-encoder";
@@ -143,7 +145,7 @@ export type RadioStatus = {
   midsongMaxTracks: number;
   requestsEnabled: boolean;
   requestsPending: number;
-  formats: { mp3: number; aac: number | null };
+  formats: { mp3: number; aac: number | null; lo?: number | null };
   /** Moderátor je ve vysílání s mikrofonem. */
   micLive: boolean;
   /** Přání čekající na schválení moderátorem. */
@@ -184,6 +186,8 @@ type PreparedStinger = {
   durationSec: number;
   deck: PcmDeck;
   gain: number;
+  /** Doznívání jinglu (s) — skladba nastoupí už pod ním, ne až po tichu. */
+  tailSec?: number;
 };
 
 type PreparedTrack = {
@@ -197,6 +201,8 @@ type PreparedTrack = {
   stinger: PreparedStinger | null;
   analysis: MixAnalysis | null;
   gain: number;
+  /** Přeskočené úvodní ticho (s) — skladba nastoupí rovnou zvukem. */
+  leadSec?: number;
 };
 
 type Voice = {
@@ -217,6 +223,8 @@ type Voice = {
   fadeOutFrames: number;
   /** Záložní jingle — ustoupí, jakmile je připravená skladba. */
   filler?: boolean;
+  /** U jinglu: kolik sekund před koncem smí nastoupit skladba. */
+  tailSec?: number;
 };
 
 /** Mixer krok — ~23 ms. */
@@ -246,10 +254,18 @@ const DUCK_RELEASE_SEC = 0.9;
 /** Po kolika sekundách ticha pustit záložní jingle. */
 const FALLBACK_AFTER_SEC = 3;
 
+/**
+ * Kolik sekund zvuku dostane posluchač hned po připojení. Přehrávač pak hraje
+ * tolik sekund „za živým vysíláním“ a má stejně velkou zásobu — krátký výpadek
+ * signálu (tunel, výtah, přepnutí Wi-Fi → data) tak přečká bez ticha.
+ */
 function getBurstSec(): number {
-  const raw = Number(process.env.RADIO_BURST_SEC ?? 2.5);
-  return Number.isFinite(raw) && raw >= 0 ? Math.min(raw, 10) : 2.5;
+  const raw = Number(process.env.RADIO_BURST_SEC ?? 8);
+  return Number.isFinite(raw) && raw >= 0 ? Math.min(raw, 20) : 8;
 }
+
+/** Kolik vteřin zvuku drží server pro každou kvalitu (pro burst i přepnutí kvality). */
+const RING_SEC = 25;
 
 /** Co hrát, když není co hrát (prázdná fronta, chyba přípravy). */
 function getFallbackPaths(midsongPaths: string[]): string[] {
@@ -493,6 +509,7 @@ export class RadioEngine {
       formats: {
         mp3: Math.floor(getStreamBitrate() / 1000),
         aac: this.outputs.has("aac") ? getAacBitrateKbps() : null,
+        lo: this.outputs.has("aac-lo") ? getAacLowBitrateKbps() : null,
       },
     };
   }
@@ -577,8 +594,18 @@ export class RadioEngine {
     return this.outputs.has(format);
   }
 
-  subscribe(format: StreamFormat = "mp3"): ReadableStream<Uint8Array> {
-    const out = this.outputs.get(format) ?? this.outputs.get("mp3");
+  /**
+   * @param burstSec kolik sekund z bufferu poslat hned (výchozí RADIO_BURST_SEC) —
+   *   přehrávač při změně kvality pošle, kolik má zrovna v zásobě, ať navazuje plynule.
+   */
+  subscribe(
+    format: StreamFormat = "mp3",
+    burstSec: number = getBurstSec(),
+  ): ReadableStream<Uint8Array> {
+    const out =
+      this.outputs.get(format) ??
+      (format === "aac-lo" ? this.outputs.get("aac") : undefined) ??
+      this.outputs.get("mp3");
     let subscriber!: Subscriber;
 
     return new ReadableStream<Uint8Array>(
@@ -616,9 +643,17 @@ export class RadioEngine {
             subscriber.close();
             return;
           }
-          // Burst-on-connect: pár sekund z bufferu → přehrávání startuje hned.
-          for (const chunk of out.burst) {
-            controller.enqueue(new Uint8Array(chunk));
+          // Burst-on-connect: pár sekund z bufferu → přehrávání startuje hned
+          // a přehrávač má zásobu na krátké výpadky signálu.
+          const want = Math.max(0, Math.min(burstSec, RING_SEC)) * out.bytesPerSec;
+          let from = out.burst.length;
+          let bytes = 0;
+          while (from > 0 && bytes < want) {
+            from -= 1;
+            bytes += out.burst[from]!.length;
+          }
+          for (let i = from; i < out.burst.length; i++) {
+            controller.enqueue(new Uint8Array(out.burst[i]!));
           }
           out.subscribers.add(subscriber);
           this.emitListeners();
@@ -661,7 +696,7 @@ export class RadioEngine {
       }
     }
 
-    const limit = Math.floor(out.bytesPerSec * getBurstSec());
+    const limit = Math.floor(out.bytesPerSec * Math.max(RING_SEC, getBurstSec()));
     out.burst.push(Buffer.from(frames));
     out.burstBytes += frames.length;
     while (
@@ -741,6 +776,7 @@ export class RadioEngine {
 
     this.startOutput("mp3");
     if (isAacEnabled()) this.startOutput("aac");
+    if (isAacLowEnabled()) this.startOutput("aac-lo");
     this.started = true;
     this.startPump();
 
@@ -1616,8 +1652,9 @@ export class RadioEngine {
     }
 
     if (m.kind === "stinger") {
-      if (remaining <= secToFrames(STINGER_TAIL_SEC) || m.deck.ended) {
-        this.startTrack(nxt, f, 0.02);
+      // Skladba nastoupí do doznívání jinglu (krátký náběh, ať to necvakne).
+      if (remaining <= secToFrames(m.tailSec ?? STINGER_TAIL_SEC) || m.deck.ended) {
+        this.startTrack(nxt, f, 0.08);
       }
       return;
     }
@@ -1681,6 +1718,7 @@ export class RadioEngine {
       fadeInFrames: secToFrames(0.02),
       fadeOutStart: null,
       fadeOutFrames: 1,
+      tailSec: st.tailSec,
     };
   }
 
@@ -1723,7 +1761,7 @@ export class RadioEngine {
       this.tails.push(this.main);
     }
 
-    const startFrame = f - secToFrames(item.offsetSec);
+    const startFrame = f - secToFrames(item.offsetSec + (item.leadSec ?? 0));
     this.main = {
       kind: "track",
       uuid: item.uuid,
@@ -2356,7 +2394,12 @@ export class RadioEngine {
       return null;
     }
 
-    const deck = new PcmDeck(this.ffmpegPath, filepath, offsetSec).start();
+    // Úvodní ticho přeskočit (jen od začátku skladby, ne při navázání uprostřed).
+    const leadSec =
+      offsetSec === 0 && analysis?.startAt && analysis.startAt > 0.3
+        ? Math.min(analysis.startAt - 0.1, 3)
+        : 0;
+    const deck = new PcmDeck(this.ffmpegPath, filepath, offsetSec + leadSec).start();
     await deck.waitReady();
 
     const meta: RadioNowPlaying = entry
@@ -2382,6 +2425,7 @@ export class RadioEngine {
       stinger: null,
       analysis,
       gain: loudnessGain(analysis?.lufs),
+      leadSec,
     };
   }
 
@@ -2400,6 +2444,10 @@ export class RadioEngine {
       durationSec: dur,
       deck,
       gain: loudnessGain(analysis?.lufs),
+      // Doznívání (dozvuk, ozvěna) — skladba nastoupí pod ním: max. 1,2 s.
+      tailSec: analysis
+        ? Math.min(Math.max(analysis.playEnd - analysis.mixAt, STINGER_TAIL_SEC), 1.2)
+        : STINGER_TAIL_SEC,
     };
   }
 

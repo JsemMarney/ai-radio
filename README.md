@@ -62,7 +62,6 @@ npm run dev
 | `SPOTIFY_CLIENT_ID` / `SECRET` | Spotify API |
 | `STUDIO_PASSWORD` | Heslo pro studio a admin API |
 | `STATION_NAME` | Název stanice |
-| `STATION_TAGLINE` | Podtitul |
 | `STATION_LOGO_URL` | Cesta k logu (např. `/brand/logo.svg`) |
 | `STATION_COLOR_*` | Barvy UI |
 | `RADIO_CROSSFADE_SEC` | Délka crossfade v sekundách (default 4) |

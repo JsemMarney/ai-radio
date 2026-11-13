@@ -38,10 +38,12 @@ export async function GET(request: Request) {
     });
   }
 
-  const format = url.searchParams.get("format") === "aac" ? "aac" : "mp3";
-  const res = await brokerStream(format === "aac" ? "/stream.aac" : "/stream").catch(
-    () => null,
-  );
+  const fmt = url.searchParams.get("format");
+  const burst = Number(url.searchParams.get("burst"));
+  const query = Number.isFinite(burst) && burst > 0 ? `?burst=${Math.min(burst, 25).toFixed(1)}` : "";
+  const res = await brokerStream(
+    `${fmt === "lo" ? "/stream.lo.aac" : fmt === "aac" ? "/stream.aac" : "/stream"}${query}`,
+  ).catch(() => null);
   if (!res || !res.ok || !res.body) {
     slot.release();
     return new Response("Rádio stream není dostupný. Spusť broadcaster.", {

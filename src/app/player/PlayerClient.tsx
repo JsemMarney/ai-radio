@@ -10,21 +10,17 @@ import {
 } from "@/lib/page-tabs";
 import {
   ListenButton,
-  LiveBadge,
   NowPlaying,
   ProgramLog,
   StationHeader,
   VolumeControl,
 } from "@/components/player/BroadcastUi";
 import { AudioVisualizer } from "@/components/player/AudioVisualizer";
-import { FavoriteAlert, FavoriteButton } from "@/components/player/Favorites";
 import { SongRequestPanel } from "@/components/player/SongRequestPanel";
-import { MessagePanel } from "@/components/player/MessagePanel";
 import { SuggestPanel } from "@/components/player/SuggestPanel";
-import { LibraryPanel } from "@/components/player/LibraryPanel";
 import { useRadio } from "@/components/RadioProvider";
 import { useCoverTint } from "@/components/player/useCoverTint";
-import type { RadioNowPlaying, StationConfig } from "@/lib/types";
+import type { StationConfig } from "@/lib/types";
 
 function StationClock() {
   const [now, setNow] = useState<Date | null>(null);
@@ -38,7 +34,7 @@ function StationClock() {
   }, []);
   if (!now) return null;
   return (
-    <span className="hidden font-[family-name:var(--font-mono)] text-sm tabular-nums text-[var(--ink-muted)] sm:inline">
+    <span className="hidden tabular-nums text-[var(--ink)] sm:inline">
       {now.toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit" })}
     </span>
   );
@@ -56,16 +52,16 @@ function Ticker({ items }: { items: string[] }) {
       {loop.map((text, i) => (
         <span key={i} className="flex items-center">
           <span className="px-6">{text}</span>
-          <span aria-hidden className="h-1.5 w-1.5 rotate-45 bg-[var(--ink)]/60" />
+          <span aria-hidden className="text-white/60">/</span>
         </span>
       ))}
     </span>
   );
   return (
-    <div className="ticker flex h-8 items-center overflow-hidden bg-[linear-gradient(90deg,var(--accent),color-mix(in_srgb,var(--accent)_60%,var(--accent-2)))] text-[var(--ink)]">
+    <div className="ticker flex h-7 items-center overflow-hidden bg-[var(--accent)] text-white">
       <div className="min-w-0 flex-1 overflow-hidden" aria-live="off">
         <div
-          className="ticker-track text-xs font-semibold uppercase tracking-wide sm:text-[13px]"
+          className="ticker-track font-[family-name:var(--font-mono)] text-[11px] font-medium uppercase tracking-wider sm:text-xs"
           // Delší pás = delší doba, ať rychlost zůstane stejná.
           style={{ animationDuration: `${40 * TICKER_REPEAT}s` }}
         >
@@ -188,29 +184,41 @@ export function PlayerClient({
 
   const tickerItems = [
     ...tickerMessages,
-    micLive ? `Ve studiu mluví ${moderator ?? "moderátor"}` : moderator ? `Moderuje ${moderator}` : "Hraje AutoDJ",
+    micLive ? `Ve studiu mluví ${moderator ?? "moderátor"}` : moderator ? `Moderuje ${moderator}` : null,
     onBreak ? "Krátká přestávka — za chvíli zase hudba" : null,
     nowPlaying ? `Právě hraje: ${nowPlaying.artist} — ${nowPlaying.title}` : null,
     `${station.name} · ${station.tagline}`,
-    "Přej si písničku dole na stránce",
+    "Přej si písničku — dole na stránce",
   ].filter((t): t is string => Boolean(t));
 
   return (
-    <div className="ambient flex min-h-screen flex-col" style={{ "--tint": tint } as CSSProperties}>
+    <div
+      className="ambient flex min-h-screen flex-col pt-[env(safe-area-inset-top)]"
+      style={{ "--tint": tint } as CSSProperties}
+    >
       <AudioVisualizer />
-      <FavoriteAlert track={onBreak ? null : nowPlaying} stationName={station.name} />
       <Ticker items={tickerItems} />
-      <header className="sticky top-0 z-20 border-b border-[var(--line)] bg-[var(--bg-deep)]/60 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
+      <header className="sticky top-0 z-20 border-b border-[var(--line)] bg-[var(--bg-deep)]">
+        <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-3 px-3 sm:h-16 sm:px-6">
           <StationHeader config={station} compact />
-          <div className="flex shrink-0 items-center gap-4">
+          <div className="flex shrink-0 items-center gap-4 font-[family-name:var(--font-mono)] text-xs text-[var(--ink-muted)]">
             <StationClock />
-            <LiveBadge live={onAir} listeners={listeners} lamp={false} />
+            <span className="flex items-center gap-2" title={onAir ? "Vysíláme živě" : "Stanice teď nevysílá"}>
+              {onAir ? (
+                <span className="tabular-nums">
+                  {listeners}
+                  <span className="hidden sm:inline"> {listeners === 1 ? "posluchač" : listeners >= 2 && listeners <= 4 ? "posluchači" : "posluchačů"}</span>
+                  <span className="sm:hidden"> poslouchá</span>
+                </span>
+              ) : (
+                <span>offline</span>
+              )}
+            </span>
           </div>
         </div>
       </header>
 
-      <main className="relative z-10 mx-auto w-full max-w-6xl flex-1 space-y-6 px-4 py-6 sm:px-6 sm:py-8">
+      <main className="relative z-10 mx-auto w-full max-w-6xl flex-1 space-y-4 px-3 py-4 sm:space-y-6 sm:px-6 sm:py-8">
         <section className="animate-fade-up">
           <NowPlaying
             track={onBreak ? null : nowPlaying}
@@ -219,28 +227,21 @@ export function PlayerClient({
               stationOnline ? (
                 micLive ? (
                   <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--accent-soft)]">
-                    <span className="live-mic h-2 w-2 rounded-full bg-[var(--accent)]" />
+                    <span className="live-mic h-2 w-2 bg-[var(--accent)]" />
                     {moderator ? `${moderator} mluví živě` : "Moderátor mluví živě"}
                   </span>
                 ) : (
-                  <span className="text-xs text-[var(--ink-muted)]">
-                    {moderator ? (
-                      <>
-                        Moderuje <span className="font-semibold text-[var(--ink)]">{moderator}</span>
-                      </>
-                    ) : (
-                      <>
-                        Hraje <span className="font-semibold text-[var(--ink)]">AutoDJ</span>
-                      </>
-                    )}
-                  </span>
+                  moderator ? (
+                    <span className="text-xs text-[var(--ink-muted)]">
+                      Moderuje <span className="font-semibold text-[var(--ink)]">{moderator}</span>
+                    </span>
+                  ) : null
                 )
               ) : null
             }
           >
-            <div className="mt-7 flex flex-wrap items-center gap-x-6 gap-y-4">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-3 sm:gap-x-6">
               <ListenButton playing={playing} busy={playing && tuning} onToggle={toggle} />
-              {!onBreak ? <FavoriteButton track={nowPlaying} /> : null}
               {/* Mobil a tablet (dotyk) mají hlasitost na tlačítkách — slider jen s myší. */}
               <div className="[@media(pointer:coarse)]:hidden">
                 <VolumeControl
@@ -269,28 +270,29 @@ export function PlayerClient({
           </NowPlaying>
         </section>
 
-        {/* Na počítači má karta s přáními stejnou výšku jako „Hrálo“ — seznam se roztáhne, zbytek se posouvá. */}
-        <div className="animate-fade-up grid items-start gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-stretch">
+        {/* Nahoře co hrálo, pod tím přání. Na počítači vedle sebe (přání natáhne výšku podle „Hrálo“). */}
+        <div className="animate-fade-up grid items-start gap-4 sm:gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-stretch">
+          <Card>
+            <RecentlyPlayed tracks={history} />
+          </Card>
           <Card fill>
             <ListenerTabs initialTab={initialTab} />
-          </Card>
-          <Card>
-            <h2 className="mb-4 text-xl font-bold tracking-tight">Hrálo</h2>
-            {history.length ? (
-              <ProgramLog tracks={history.slice(0, 8)} />
-            ) : (
-              <p className="py-8 text-center text-sm text-[var(--ink-muted)]">Zatím nic nehrálo.</p>
-            )}
           </Card>
         </div>
       </main>
 
-      <footer className="relative z-10 border-t border-[var(--line)]">
-        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-[var(--ink-muted)] sm:px-6">
+      <footer className="relative z-10 border-t border-[var(--line)] pb-[env(safe-area-inset-bottom)]">
+        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-5 text-xs text-[var(--ink-muted)] sm:px-6">
           <span>
             {station.name} · {station.tagline}
           </span>
-          <div className="flex items-center gap-5">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <Link href="/privacy" className="transition-colors hover:text-[var(--ink)]">
+              Privacy
+            </Link>
+            <Link href="/terms" className="transition-colors hover:text-[var(--ink)]">
+              Terms
+            </Link>
             <button
               type="button"
               onClick={() => setVisualizer(!visualizer)}
@@ -316,6 +318,65 @@ export function PlayerClient({
   );
 }
 
+/** Co hrálo: na mobilu 4 skladby a „Zobrazit víc“, na počítači 8. */
+function RecentlyPlayed({ tracks }: { tracks: Parameters<typeof ProgramLog>[0]["tracks"] }) {
+  const [more, setMore] = useState(false);
+  if (!tracks.length)
+    return (
+      <>
+        <h2 className="label mb-3">Hrálo</h2>
+        <p className="py-6 text-center text-sm text-[var(--ink-muted)]">Zatím nic nehrálo.</p>
+      </>
+    );
+  return (
+    <>
+      <h2 className="label mb-3">Hrálo</h2>
+      <div className="lg:hidden">
+        <ProgramLog tracks={tracks.slice(0, 4)} />
+        {tracks.length > 4 ? (
+          <>
+            {/* Další skladby plynule vyjedou / zajedou (výška 0fr ↔ 1fr). */}
+            <div
+              className={`grid transition-[grid-template-rows,opacity] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${
+                more ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
+              }`}
+              aria-hidden={!more}
+              inert={!more}
+            >
+              <div className="min-h-0 overflow-hidden">
+                <ProgramLog tracks={tracks.slice(4, 10)} />
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMore(!more)}
+              aria-expanded={more}
+              className="mt-1 flex w-full items-center justify-center gap-2 border-t border-[var(--line)] pt-3 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+            >
+              {more ? "Zobrazit méně" : "Zobrazit víc"}
+              <svg
+                aria-hidden
+                viewBox="0 0 24 24"
+                className={`h-4 w-4 transition-transform duration-500 ${more ? "rotate-180" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+          </>
+        ) : null}
+      </div>
+      <div className="hidden lg:block">
+        <ProgramLog tracks={tracks.slice(0, 8)} />
+      </div>
+    </>
+  );
+}
+
 /** Všechno, co posluchač může poslat do studia — v jedné kartě se záložkami (každá má adresu). */
 function ListenerTabs({ initialTab }: { initialTab: ListenerTab }) {
   const [tab, setTabState] = useState<ListenerTab>(initialTab);
@@ -329,10 +390,17 @@ function ListenerTabs({ initialTab }: { initialTab: ListenerTab }) {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
-  const [pick, setPick] = useState<{ track: RadioNowPlaying; n: number } | null>(null);
   return (
     <section className="flex min-h-0 flex-col lg:h-full">
-      <div className="mb-5 flex shrink-0 gap-1 overflow-x-auto rounded-full border border-[var(--line)] bg-[var(--bg-deep)]/60 p-1" role="tablist">
+      <div className="relative mb-5 grid shrink-0 grid-cols-2 border-b border-[var(--line)]" role="tablist">
+        {/* Podtržení plynule přejede pod vybranou záložku. */}
+        <span
+          aria-hidden
+          className="pointer-events-none absolute -bottom-px left-0 h-0.5 w-1/2 bg-[var(--accent)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+          style={{
+            transform: `translateX(${Math.max(0, LISTENER_TABS.findIndex((t) => t.tab === tab)) * 100}%)`,
+          }}
+        />
         {LISTENER_TABS.map(({ tab: value, label, short }) => (
           <a
             key={value}
@@ -344,50 +412,39 @@ function ListenerTabs({ initialTab }: { initialTab: ListenerTab }) {
               e.preventDefault();
               setTab(value);
             }}
-            className={`flex-1 whitespace-nowrap rounded-full px-3 py-2 text-sm font-semibold transition-colors ${
-              tab === value ? "btn-glow text-[var(--ink)]" : "text-[var(--ink-muted)] hover:bg-[var(--ink)]/5 hover:text-[var(--ink)]"
+            className={`whitespace-nowrap px-1 pb-3 pt-1 text-center text-sm font-bold uppercase tracking-wide transition-colors duration-300 ${
+              tab === value ? "text-[var(--ink)]" : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
             }`}
           >
-            <span className="hidden 2xl:inline">{label}</span>
-            <span className="2xl:hidden">{short}</span>
+            <span className="hidden sm:inline">{label}</span>
+            <span className="sm:hidden">{short}</span>
           </a>
         ))}
       </div>
       {/* Panely zůstávají připojené — rozepsaný vzkaz ani hledání se přepnutím neztratí. */}
       <div className={tab === "request" ? "min-h-0 flex-1" : "hidden"}>
-        <SongRequestPanel pick={pick} />
-      </div>
-      <div className={tab === "library" ? "min-h-0 flex-1" : "hidden"}>
-        <LibraryPanel
-          onRequest={(track) => {
-            setPick((p) => ({ track, n: (p?.n ?? 0) + 1 }));
-            setTab("request");
-          }}
-        />
+        <SongRequestPanel />
       </div>
       <div hidden={tab !== "suggest"}>
         <SuggestPanel />
-      </div>
-      <div hidden={tab !== "message"}>
-        <MessagePanel />
       </div>
     </section>
   );
 }
 
 function Card({ children, fill = false }: { children: ReactNode; fill?: boolean }) {
-  if (!fill) return <div className="glass min-w-0 rounded-3xl p-5 sm:p-6">{children}</div>;
+  if (!fill) return <div className="glass min-w-0 rounded-md p-4 sm:p-6">{children}</div>;
   // fill: obsah nepřidává výšku řádku (na lg) — kartu natáhne soused a obsah se do ní vejde.
   return (
-    <div className="glass relative min-w-0 rounded-3xl lg:min-h-[32rem]">
-      <div className="p-5 sm:p-6 lg:absolute lg:inset-0 lg:overflow-y-auto">{children}</div>
+    <div className="glass relative min-w-0 rounded-md lg:min-h-[32rem]">
+      <div className="p-4 sm:p-6 lg:absolute lg:inset-0 lg:overflow-y-auto">{children}</div>
     </div>
   );
 }
 
 function readLastVolume(): number {
   if (typeof window === "undefined") return 0.85;
-  const raw = localStorage.getItem("ai-radio-volume");
+  const raw = localStorage.getItem("ai-radio-volume-last") ?? localStorage.getItem("ai-radio-volume");
   const n = raw ? Number(raw) : 0.85;
   return Number.isFinite(n) && n > 0 ? n : 0.85;
 }

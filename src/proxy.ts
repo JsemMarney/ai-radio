@@ -96,6 +96,9 @@ function buildCsp(nonce: string, host: string | null): string {
         ? `ws://${host} wss://${host}`
         : (originOf(getMicWsUrl(host).replace(/^ws/, "http"))?.replace(/^http/, "ws") ?? "")
     }${dev ? " ws: wss:" : ""}`,
+    // Service worker (PWA) — 'strict-dynamic' by ho jinak zablokoval.
+    "worker-src 'self'",
+    "manifest-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

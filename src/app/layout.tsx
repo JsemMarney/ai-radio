@@ -1,8 +1,9 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { connection } from "next/server";
 import type { CSSProperties } from "react";
 import { Montserrat } from "next/font/google";
 import { RadioProvider } from "@/components/RadioProvider";
+import { PwaRegister } from "@/components/PwaRegister";
 import { getStationConfig } from "@/lib/station-config";
 import "./globals.css";
 
@@ -17,6 +18,29 @@ const station = getStationConfig();
 export const metadata: Metadata = {
   title: `${station.name} — live radio`,
   description: station.tagline,
+  applicationName: station.name,
+  appleWebApp: {
+    capable: true,
+    title: station.name,
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    icon: [
+      { url: "/brand/logo.svg", type: "image/svg+xml" },
+      { url: "/icons/icon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    shortcut: "/icons/icon-32.png",
+    apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180" }],
+  },
+  formatDetection: { telephone: false },
+};
+
+export const viewport: Viewport = {
+  themeColor: station.colorBg,
+  colorScheme: "dark",
+  // Obsah až pod výřez/notch (aplikace na ploše); okraje řeší safe-area paddingy.
+  viewportFit: "cover",
 };
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
@@ -37,6 +61,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       }
     >
       <body className="flex min-h-full flex-col">
+        <PwaRegister />
         <RadioProvider>{children}</RadioProvider>
       </body>
     </html>

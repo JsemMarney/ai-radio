@@ -25,7 +25,9 @@ function recentKey(tracks: RadioNowPlaying[]): string {
 const VOLUME_KEY = "ai-radio-volume";
 const DEFAULT_VOLUME = 0.85;
 
-type StreamFormat = "mp3" | "aac";
+/** mp3 = plná kvalita, aac = střední, lo = úsporná (slabý signál). */
+type StreamFormat = "mp3" | "aac" | "lo";
+type Formats = { mp3: number; aac: number | null; lo: number | null };
 export type StreamQuality = "auto" | "high" | "low";
 
 const QUALITY_KEY = "ai-radio-quality";
@@ -50,12 +52,10 @@ async function resolveStreamUrl(): Promise<string> {
   const cached = streamUrlCache.get(format);
   if (cached && cached.expiresAt > now + 120) return cached.url;
 
-  const fallback = format === "aac" ? `${STREAM_URL}?format=aac` : STREAM_URL;
+  const query = format === "mp3" ? "" : `?format=${format}`;
+  const fallback = `${STREAM_URL}${query}`;
   try {
-    const res = await fetch(
-      `/api/radio/stream-url${format === "aac" ? "?format=aac" : ""}`,
-      { cache: "no-store" },
-    );
+    const res = await fetch(`/api/radio/stream-url${query}`, { cache: "no-store" });
     if (!res.ok) return fallback;
     const data = (await res.json()) as {
       url?: string;
@@ -76,16 +76,36 @@ async function resolveStreamUrl(): Promise<string> {
   return fallback;
 }
 
-/** Slabé připojení / úspora dat / telefon → úspornější AAC. */
-function prefersLightStream(): boolean {
-  if (typeof window === "undefined") return false;
-  const conn = (navigator as Navigator & {
-    connection?: { saveData?: boolean; effectiveType?: string };
-  }).connection;
-  if (conn?.saveData) return true;
-  if (conn?.effectiveType && /(^|-)(2g|3g)$/.test(conn.effectiveType)) return true;
-  return window.matchMedia?.("(pointer: coarse)").matches ?? false;
+type NetInfo = { saveData?: boolean; effectiveType?: string };
+function netInfo(): NetInfo | undefined {
+  if (typeof navigator === "undefined") return undefined;
+  return (navigator as Navigator & { connection?: NetInfo }).connection;
 }
+
+/** Kvality, které stanice nabízí — od nejúspornější po nejlepší. */
+function ladder(f: Formats): StreamFormat[] {
+  const out: StreamFormat[] = [];
+  if (f.lo) out.push("lo");
+  if (f.aac) out.push("aac");
+  out.push("mp3");
+  return out;
+}
+
+/** Úvodní kvalita podle toho, co prohlížeč ví o připojení (pak se ladí za běhu). */
+function initialFormat(levels: StreamFormat[]): StreamFormat {
+  if (typeof window === "undefined") return "mp3";
+  const conn = netInfo();
+  const lowest = levels[0]!;
+  const mid = levels.includes("aac") ? "aac" : lowest;
+  if (conn?.saveData || (conn?.effectiveType && /(^|-)2g$/.test(conn.effectiveType))) return lowest;
+  if (conn?.effectiveType === "3g") return mid;
+  // Telefon: střední AAC (zní skoro stejně a šetří data).
+  if (window.matchMedia?.("(pointer: coarse)").matches) return mid;
+  return "mp3";
+}
+
+/** Za jak dlouho bez problémů zkusit vyšší kvalitu (prodlužuje se, když to nevyjde). */
+let upgradeWaitMs = 3 * 60_000;
 
 /** Kvalitu volí přehrávač sám — staré ruční nastavení se zahodí. */
 function readStoredQuality(): StreamQuality {
@@ -186,7 +206,7 @@ type StatusPayload = {
   midsongConfigured?: boolean;
   midsongMinTracks?: number;
   midsongMaxTracks?: number;
-  formats?: { mp3: number; aac: number | null };
+  formats?: { mp3: number; aac: number | null; lo?: number | null };
   micLive?: boolean;
   moderationPending?: number;
   breakState?: BreakState;
@@ -319,16 +339,16 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const [aiHost, setAiHost] = useState<string | null>(null);
   const [tickerMessages, setTickerMessages] = useState<string[]>([]);
   const [quality, setQualityState] = useState<StreamQuality>("auto");
-  const [formats, setFormats] = useState<{ mp3: number; aac: number | null }>({
-    mp3: 0,
-    aac: null,
-  });
+  const [formats, setFormats] = useState<Formats>({ mp3: 0, aac: null, lo: null });
+  const [format, setFormatState] = useState<StreamFormat>("mp3");
 
   const setVolume = useCallback((value: number) => {
     const next = Math.min(1, Math.max(0, value));
     setVolumeState(next);
     if (typeof window !== "undefined") {
       localStorage.setItem(VOLUME_KEY, String(next));
+      // Poslední nenulová hlasitost — na ni se vrátí odtlumení.
+      if (next > 0) localStorage.setItem(`${VOLUME_KEY}-last`, String(next));
     }
     if (audioRef.current) {
       applyGain(toGain(next));
@@ -411,9 +431,9 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     if (data.aiHost !== undefined) setAiHost(data.aiHost);
     if (data.tickerMessages !== undefined) setTickerMessages(data.tickerMessages);
     if (data.formats) {
-      const f = data.formats;
+      const f = { mp3: data.formats.mp3, aac: data.formats.aac, lo: data.formats.lo ?? null };
       setFormats((prev) =>
-        prev.mp3 === f.mp3 && prev.aac === f.aac ? prev : f,
+        prev.mp3 === f.mp3 && prev.aac === f.aac && prev.lo === f.lo ? prev : f,
       );
     }
   }, []);
@@ -624,24 +644,126 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     });
   }, [connectStream, volume, setVolume, visualizer, ensureGraph, applyGain]);
 
-  // Vybrat formát podle nastavení kvality a toho, co stanice umí.
-  const wantsLight =
-    quality === "low" || (quality === "auto" && prefersLightStream());
-  const format: StreamFormat = wantsLight && formats.aac ? "aac" : "mp3";
-
-  useEffect(() => {
-    if (format === activeFormat) return;
-    activeFormat = format;
+  /**
+   * Přepne kvalitu (nebo jen znovu připojí). `burstSec` = kolik sekund si přehrávač
+   * řekne hned — při změně kvality tolik, kolik má v zásobě, ať hudba navazuje.
+   */
+  const switchFormat = useCallback((next: StreamFormat, burstSec?: number) => {
+    activeFormat = next;
+    setFormatState(next);
     const el = audioRef.current;
-    if (el && !el.paused) {
-      void resolveStreamUrl().then((url) => {
-        setStreamUrl(url);
-        el.src = withStreamCacheBust(url);
-        el.load();
-        void el.play().catch(() => {});
-      });
-    }
-  }, [format]);
+    if (!el || el.paused) return;
+    void resolveStreamUrl().then((url) => {
+      setStreamUrl(url);
+      const burst =
+        burstSec !== undefined ? `&burst=${Math.max(1, Math.min(burstSec, 20)).toFixed(1)}` : "";
+      el.src = `${withStreamCacheBust(url)}${burst}`;
+      el.load();
+      void el.play().catch(() => {});
+    });
+  }, []);
+
+  // Kvalita podle nastavení a toho, co stanice umí (auto: start podle připojení).
+  const formatsReady = formats.mp3 > 0;
+  useEffect(() => {
+    if (!formatsReady) return;
+    const levels = ladder(formats);
+    const target =
+      quality === "high"
+        ? "mp3"
+        : quality === "low"
+          ? levels[0]!
+          : levels.includes(activeFormat) && audioRef.current && !audioRef.current.paused
+            ? activeFormat
+            : initialFormat(levels);
+    if (target !== activeFormat) switchFormat(target);
+    else setFormatState(target);
+  }, [formatsReady, formats, quality, switchFormat]);
+
+  // Automatika za běhu: hlídá zásobu přehrávače a zaseknutí.
+  //  - zásoba dlouho pod 2,5 s nebo zaseknutí > 1,5 s → nižší kvalita,
+  //  - zaseknuté víc než 8 s (spojení umřelo) → znovu připojit,
+  //  - pár minut bez problémů → zkusit vyšší kvalitu.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !playing) return;
+    const levels = ladder(formats);
+    const auto = quality === "auto";
+    let lastSwitch = Date.now();
+    let lastUpgrade = 0;
+    let goodSince = Date.now();
+    let lowSince = 0;
+    let stallStart = 0;
+    let bufferedWorks = false;
+
+    const ahead = () => {
+      const b = el.buffered;
+      return b.length ? b.end(b.length - 1) - el.currentTime : 0;
+    };
+    const step = (dir: -1 | 1) => {
+      const i = levels.indexOf(activeFormat);
+      const next = levels[i + dir];
+      if (!auto || i < 0 || !next) return false;
+      if (dir < 0 && Date.now() - lastUpgrade < 90_000) {
+        // Vyšší kvalita nevydržela → příště čekat déle (max. 30 min).
+        upgradeWaitMs = Math.min(upgradeWaitMs * 2, 30 * 60_000);
+      }
+      if (dir > 0) lastUpgrade = Date.now();
+      switchFormat(next, ahead());
+      lastSwitch = Date.now();
+      goodSince = Date.now();
+      lowSince = 0;
+      return true;
+    };
+    const reconnectNow = () => {
+      stallStart = 0;
+      lastSwitch = Date.now();
+      switchFormat(activeFormat);
+    };
+
+    const onWaiting = () => {
+      if (!stallStart) stallStart = Date.now();
+    };
+    const onPlaying = () => {
+      const stalled = stallStart ? Date.now() - stallStart : 0;
+      stallStart = 0;
+      if (stalled > 1500 && Date.now() - lastSwitch > 10_000) step(-1);
+    };
+    const onOnline = () => {
+      if (stallStart) reconnectNow();
+    };
+
+    const timer = setInterval(() => {
+      if (el.paused) return;
+      const now = Date.now();
+      if (stallStart && now - stallStart > 8_000) {
+        // Spojení se po výpadku samo neobnoví — připojit znovu (a radši níž).
+        if (!step(-1)) reconnectNow();
+        return;
+      }
+      const a = ahead();
+      if (a > 3) bufferedWorks = true;
+      if (!bufferedWorks || now - lastSwitch < 12_000) return;
+      if (a < 2.5) {
+        lowSince ||= now;
+        if (now - lowSince > 4_000) step(-1);
+      } else {
+        lowSince = 0;
+      }
+      if (a < 5) goodSince = now;
+      if (now - goodSince > upgradeWaitMs && !netInfo()?.saveData) step(1);
+    }, 2_000);
+
+    el.addEventListener("waiting", onWaiting);
+    el.addEventListener("playing", onPlaying);
+    window.addEventListener("online", onOnline);
+    return () => {
+      clearInterval(timer);
+      el.removeEventListener("waiting", onWaiting);
+      el.removeEventListener("playing", onPlaying);
+      window.removeEventListener("online", onOnline);
+    };
+  }, [playing, formats, quality, switchFormat]);
 
   const setQuality = useCallback((value: StreamQuality) => {
     setQualityState(value);
@@ -653,11 +775,13 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const streamLabel =
-    format === "aac" && formats.aac
-      ? `AAC ${formats.aac} kbps`
-      : formats.mp3
-        ? `MP3 ${formats.mp3} kbps`
-        : "";
+    format === "lo" && formats.lo
+      ? `AAC ${formats.lo} kbps`
+      : format === "aac" && formats.aac
+        ? `AAC ${formats.aac} kbps`
+        : formats.mp3
+          ? `MP3 ${formats.mp3} kbps`
+          : "";
 
   const pause = useCallback(() => {
     audioRef.current?.pause();

@@ -35,7 +35,7 @@
         <mp3-metadata-interval>16384</mp3-metadata-interval>
         <burst-size>65536</burst-size>
         <stream-name>Miss Radio</stream-name>
-        <stream-description>24/7 auto DJ</stream-description>
+        <stream-description>Hraje, co si přeješ</stream-description>
         <stream-url>http://127.0.0.1:8787/player</stream-url>
         <genre>Various</genre>
     </mount>

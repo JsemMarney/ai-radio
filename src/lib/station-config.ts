@@ -9,15 +9,30 @@ export type StationConfig = {
   colorBgPanel: string;
 };
 
+/** Paleta značky: rádiová červená, jantarový doplněk a teplá skoro-černá. */
+export const BRAND = {
+  accent: "#e5202e",
+  accentSoft: "#ff7a7f",
+  accent2: "#ffb547",
+  bg: "#0d0b0b",
+  bgMid: "#161212",
+  bgPanel: "#201919",
+  /** Slogan stanice (podtitul v hlavičce, tickeru, PWA i v Icecastu). */
+  tagline: "Hraje, co si přeješ",
+} as const;
+
 export function getStationConfig(): StationConfig {
   return {
     name: process.env.STATION_NAME ?? "Miss Radio",
-    tagline: process.env.STATION_TAGLINE ?? "24/7 music",
+    // Slogan je součást značky — staré STATION_TAGLINE v .env.local se ignoruje.
+    tagline: BRAND.tagline,
     logoUrl: process.env.STATION_LOGO_URL ?? "/brand/logo.svg",
-    colorAccent: process.env.STATION_COLOR_ACCENT ?? "#e5322d",
-    colorAccentSoft: process.env.STATION_COLOR_ACCENT_SOFT ?? "#ff6b55",
-    colorBg: process.env.STATION_COLOR_BG ?? "#120b0a",
-    colorBgMid: process.env.STATION_COLOR_BG_MID ?? "#1b1110",
-    colorBgPanel: process.env.STATION_COLOR_BG_PANEL ?? "#241614",
+    // Barvy značky Miss Radio (červená + jantarová) jsou pevně dané — staré
+    // STATION_COLOR_* v .env.local se už nepoužívají.
+    colorAccent: BRAND.accent,
+    colorAccentSoft: BRAND.accentSoft,
+    colorBg: BRAND.bg,
+    colorBgMid: BRAND.bgMid,
+    colorBgPanel: BRAND.bgPanel,
   };
 }

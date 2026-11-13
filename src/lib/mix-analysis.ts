@@ -16,6 +16,8 @@ export type MixAnalysis = {
   lufs: number | null;
   /** Délka slyšitelného audia (bez koncového ticha). */
   playEnd: number;
+  /** Kde končí úvodní digitální ticho (skladba se pustí až odsud). */
+  startAt?: number;
   /** Kdy skladba poprvé dosáhne plné síly (tiché intro před tím). */
   introAt: number;
   /** Kdy skladba naposledy hraje plnou silou (začátek outra / fade-outu). */
@@ -24,7 +26,8 @@ export type MixAnalysis = {
   mixAt: number;
 };
 
-const VERSION = 1;
+// 2: + startAt (úvodní ticho)
+const VERSION = 2;
 const WINDOW_SEC = 0.1;
 const ANALYSIS_RATE = 4000;
 
@@ -66,8 +69,12 @@ export function computeCues(windowsDb: number[]): Omit<MixAnalysis, "v" | "file"
   const n = windowsDb.length;
   const total = n * WINDOW_SEC;
   if (n < 20) {
-    return { playEnd: total, introAt: 0, outroAt: total, mixAt: total };
+    return { playEnd: total, startAt: 0, introAt: 0, outroAt: total, mixAt: total };
   }
+
+  // Úvodní ticho (pod -50 dB) — u spousty MP3 je to půl až dvě sekundy „díry“.
+  let firstAudible = 0;
+  while (firstAudible < n - 1 && windowsDb[firstAudible]! < -50) firstAudible++;
 
   let lastAudible = n - 1;
   while (lastAudible > 0 && windowsDb[lastAudible]! < -45) lastAudible--;
@@ -90,6 +97,7 @@ export function computeCues(windowsDb: number[]): Omit<MixAnalysis, "v" | "file"
 
   return {
     playEnd,
+    startAt: Math.min(firstAudible * WINDOW_SEC, 5),
     introAt: intro * WINDOW_SEC,
     outroAt: Math.min(playEnd, (outro + 1) * WINDOW_SEC),
     mixAt: Math.min(playEnd, mix * WINDOW_SEC),

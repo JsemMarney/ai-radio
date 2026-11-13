@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { getStationConfig } from "@/lib/station-config";
-import { LISTENER_TABS } from "@/lib/page-tabs";
+import { LISTENER_TABS, RETIRED_PLAYER_SLUGS } from "@/lib/page-tabs";
 import { PlayerClient } from "../PlayerClient";
 
 type Props = { params: Promise<{ tab: string }> };
@@ -15,6 +15,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 
 export default async function PlayerTabPage({ params }: Props) {
   const { tab } = await params;
+  if (RETIRED_PLAYER_SLUGS.includes(tab)) redirect("/player");
   const t = LISTENER_TABS.find((x) => x.slug === tab && x.slug);
   if (!t) notFound();
   return <PlayerClient station={getStationConfig()} initialTab={t.tab} />;

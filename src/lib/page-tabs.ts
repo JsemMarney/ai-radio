@@ -21,14 +21,15 @@ export function studioTabFromPath(pathname: string): StudioTab {
   return STUDIO_TABS.find((t) => t.slug === slug)?.tab ?? "live";
 }
 
-export type ListenerTab = "request" | "library" | "suggest" | "message";
+export type ListenerTab = "request" | "suggest";
 
 export const LISTENER_TABS: { tab: ListenerTab; slug: string; label: string; short: string }[] = [
-  { tab: "request", slug: "", label: "Přej si písničku", short: "Přání" },
-  { tab: "library", slug: "library", label: "Knihovna", short: "Knihovna" },
-  { tab: "suggest", slug: "suggest", label: "Navrhni novou", short: "Navrhnout" },
-  { tab: "message", slug: "message", label: "Vzkaz do studia", short: "Vzkaz" },
+  { tab: "request", slug: "", label: "Přát si písničku", short: "Přát si" },
+  { tab: "suggest", slug: "suggest", label: "Navrhnout novou", short: "Navrhnout" },
 ];
+
+/** Staré adresy záložek, které už nejsou — přesměrují se na přehrávač. */
+export const RETIRED_PLAYER_SLUGS = ["library", "message"];
 
 export function playerPath(tab: ListenerTab): string {
   const slug = LISTENER_TABS.find((t) => t.tab === tab)?.slug ?? "";

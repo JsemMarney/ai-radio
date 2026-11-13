@@ -28,14 +28,13 @@ import {
   tryAcquireBroadcastLock,
 } from "@/lib/radio-state";
 import { verifyBrokerRequest } from "@/lib/broker-auth";
-import { getStreamBitrate } from "@/lib/ffmpeg";
 import { isTrackId } from "@/lib/library";
 import { verifyMicTicket } from "@/lib/mic-input";
 import { voiceNotePath } from "@/lib/voice-notes";
 import { WsConnection } from "@/lib/ws-lite";
 import type { Duplex } from "node:stream";
 import { getStationConfig } from "@/lib/station-config";
-import { getAacBitrateKbps, type StreamFormat } from "@/lib/stream-encoder";
+import { formatBitrateKbps, type StreamFormat } from "@/lib/stream-encoder";
 
 type SseClient = ServerResponse;
 
@@ -124,7 +123,7 @@ function handleStream(
   format: StreamFormat = "mp3",
 ): void {
   const engine = getRadioEngine();
-  if (format === "aac" && !engine.hasFormat("aac")) {
+  if (format !== "mp3" && !engine.hasFormat(format) && !engine.hasFormat("aac")) {
     sendJson(res, 404, { error: "AAC stream je vypnutý (RADIO_AAC=0)." });
     return;
   }
@@ -145,7 +144,7 @@ function handleStream(
 
   const webPort = process.env.PORT ?? "8787";
   const headers: Record<string, string> = {
-    "Content-Type": format === "aac" ? "audio/aac" : "audio/mpeg",
+    "Content-Type": format === "mp3" ? "audio/mpeg" : "audio/aac",
     "Cache-Control": "no-cache, no-store, must-revalidate, private",
     Pragma: "no-cache",
     Expires: "0",
@@ -155,9 +154,7 @@ function handleStream(
     "Accept-Ranges": "none",
     "icy-name": station.name,
     "icy-genre": "Various",
-    "icy-br": String(
-      format === "aac" ? getAacBitrateKbps() : Math.floor(getStreamBitrate() / 1000),
-    ),
+    "icy-br": String(formatBitrateKbps(format)),
     "icy-url": `http://127.0.0.1:${webPort}/player`,
     "icy-pub": "1",
   };
@@ -178,7 +175,12 @@ function handleStream(
   const client: StreamClient = { res, icy, closed: false };
   streamClients.add(client);
 
-  const body = engine.subscribe(format);
+  // ?burst=N — kolik sekund zvuku poslat hned (přehrávač při změně kvality).
+  const burstRaw = Number(new URL(req.url ?? "/", "http://x").searchParams.get("burst"));
+  const body = engine.subscribe(
+    format,
+    Number.isFinite(burstRaw) && burstRaw > 0 ? burstRaw : undefined,
+  );
   const reader = body.getReader();
 
   const pump = (): void => {
@@ -286,6 +288,11 @@ async function handleRequest(
 
   if (req.method === "GET" && url.pathname === "/stream.aac") {
     handleStream(req, res, "aac");
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/stream.lo.aac") {
+    handleStream(req, res, "aac-lo");
     return;
   }
 

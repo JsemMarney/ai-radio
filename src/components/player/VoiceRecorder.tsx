@@ -112,7 +112,7 @@ export function VoiceRecorder({
             onClick={remove}
             aria-label="Smazat hlasovku"
             title="Smazat"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[var(--ink-muted)] transition-colors hover:bg-[var(--ink)]/10 hover:text-[var(--danger)]"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--ink)]/10 hover:text-[var(--danger)]"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12M9 7V4h6v3" />
@@ -121,14 +121,14 @@ export function VoiceRecorder({
         </div>
       ) : state === "recording" ? (
         <div className="mt-2 flex items-center gap-3">
-          <span className="live-mic h-2.5 w-2.5 rounded-full bg-[var(--accent)]" aria-hidden />
+          <span className="live-mic h-2.5 w-2.5 bg-[var(--accent)]" aria-hidden />
           <span className="font-[family-name:var(--font-mono)] text-[var(--ink)]">
             0:{String(seconds).padStart(2, "0")} / 0:{MAX_SEC}
           </span>
           <button
             type="button"
             onClick={stop}
-            className="rounded-full bg-[var(--ink)] px-4 py-1.5 text-sm text-[var(--bg-deep)]"
+            className="rounded-md bg-[var(--ink)] px-4 py-1.5 text-sm text-[var(--bg-deep)]"
           >
             Hotovo
           </button>
@@ -137,7 +137,7 @@ export function VoiceRecorder({
         <button
           type="button"
           onClick={() => void start()}
-          className="mt-2 inline-flex min-h-[44px] items-center gap-2 rounded-full border border-[var(--line-strong)] px-4 text-sm text-[var(--ink)] transition-colors hover:border-[var(--accent)]"
+          className="mt-2 inline-flex min-h-[44px] items-center gap-2 rounded-md border border-[var(--line-strong)] px-4 text-sm text-[var(--ink)] transition-colors hover:border-[var(--accent)]"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
             <rect x="9" y="3" width="6" height="11" rx="3" />
