@@ -18,6 +18,8 @@ import {
 import { AudioVisualizer } from "@/components/player/AudioVisualizer";
 import { SongRequestPanel } from "@/components/player/SongRequestPanel";
 import { SuggestPanel } from "@/components/player/SuggestPanel";
+import { QuizPanel } from "@/components/player/QuizPanel";
+import { ActivitiesPanel } from "@/components/player/ActivitiesPanel";
 import { useRadio } from "@/components/RadioProvider";
 import { useCoverTint } from "@/components/player/useCoverTint";
 import type { StationConfig } from "@/lib/types";
@@ -270,6 +272,9 @@ export function PlayerClient({
           </NowPlaying>
         </section>
 
+        {/* Kvíz se odemkne, když ho moderátor vyhlásí; po odpovědi zase zmizí. */}
+        <QuizPanel />
+
         {/* Nahoře co hrálo, pod tím přání. Na počítači vedle sebe (přání natáhne výšku podle „Hrálo“). */}
         <div className="animate-fade-up grid items-start gap-4 sm:gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-stretch">
           <Card>
@@ -392,12 +397,17 @@ function ListenerTabs({ initialTab }: { initialTab: ListenerTab }) {
   }, []);
   return (
     <section className="flex min-h-0 flex-col lg:h-full">
-      <div className="relative mb-5 grid shrink-0 grid-cols-2 border-b border-[var(--line)]" role="tablist">
+      <div
+        className="relative mb-5 grid shrink-0 border-b border-[var(--line)]"
+        style={{ gridTemplateColumns: `repeat(${LISTENER_TABS.length}, minmax(0, 1fr))` }}
+        role="tablist"
+      >
         {/* Podtržení plynule přejede pod vybranou záložku. */}
         <span
           aria-hidden
-          className="pointer-events-none absolute -bottom-px left-0 h-0.5 w-1/2 bg-[var(--accent)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+          className="pointer-events-none absolute -bottom-px left-0 h-0.5 bg-[var(--accent)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
           style={{
+            width: `${100 / LISTENER_TABS.length}%`,
             transform: `translateX(${Math.max(0, LISTENER_TABS.findIndex((t) => t.tab === tab)) * 100}%)`,
           }}
         />
@@ -427,6 +437,9 @@ function ListenerTabs({ initialTab }: { initialTab: ListenerTab }) {
       </div>
       <div hidden={tab !== "suggest"}>
         <SuggestPanel />
+      </div>
+      <div hidden={tab !== "quiz"}>
+        <ActivitiesPanel />
       </div>
     </section>
   );

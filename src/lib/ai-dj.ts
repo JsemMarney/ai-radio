@@ -108,6 +108,8 @@ export type AiDjBudget = {
   usedToday: number;
   /** Stačí rozpočet na další vstup? */
   canSpeak: boolean;
+  /** Na nutný vstup (předávka směny) stačí zbytek měsíce — denní příděl se nehlídá. */
+  canSpeakEssential: boolean;
   /** Skutečné kredity z ElevenLabs (když je klíč smí číst). */
   credits?: ElevenCredits | null;
   advice?: AiDjAdvice | null;
@@ -121,6 +123,10 @@ export type AiDjFocus =
   | "vibe"
   | "invite"
   | "quiz"
+  | "quiz-answer"
+  | "quiz-winners"
+  | "question"
+  | "question-read"
   | "hourly-news"
   | "voice-reply"
   | "request"
@@ -191,6 +197,31 @@ export type DjContext = {
   stats?: { listeners: number; nextPlaysRecent: number };
   /** Přepis hlasovky posluchače, na kterou má AI odpovědět. */
   voiceReply?: { id?: string; from: string | null; text: string } | null;
+  /** Výsledek kvízu z webu — odpověď zazní hned po kvízové písničce. */
+  quizResult?: QuizResult | null;
+  /** Kvíz: hádá se rok, nebo interpret (ten je pak všude schovaný jako „????“). */
+  quizKind?: QuizKind;
+  /** Otázka dne (a u čtení vybrané odpovědi posluchačů z webu). */
+  dayQuestion?: { text: string; answers?: { name: string; text: string }[] } | null;
+  /** Vítězové kvízového týdne (neděle večer). */
+  quizBoard?: { name: string; points: number }[] | null;
+};
+
+export type QuizKind = "year" | "artist";
+
+export type QuizResult = {
+  kind: QuizKind;
+  artist: string;
+  title: string;
+  year: string;
+  /** Kolik tipů přišlo. */
+  total: number;
+  /** Kolik z nich bylo správně (i bez jména). */
+  right: number;
+  /** Kdo trefil (jména, jak je poslali; sprostá vynechaná). */
+  winners: string[];
+  /** Nikdo netrefil → nejbližší tip. */
+  closest: { name: string; year: number } | null;
 };
 
 export type AiDjState = {
@@ -242,7 +273,25 @@ const EMOTION_TAGS = [
   "hums",
   "surprised",
   "calm",
+  "cheerfully",
+  "mischievously",
+  "exhales",
+  "laughs harder",
+  "sarcastic",
 ];
+
+/**
+ * Stabilita hlasu (v3/v4 bere jen 0 / 0.5 / 1): 0 = „Creative“ — nejvíc emocí,
+ * 0.5 = „Natural“. Zprávy čte klidně, zbytek prožívá. ELEVENLABS_STABILITY to přebije.
+ */
+function voiceStability(focus: AiDjFocus): number {
+  const raw = process.env.ELEVENLABS_STABILITY?.trim();
+  if (raw) {
+    const n = Number(raw);
+    if (n === 0 || n === 0.5 || n === 1) return n;
+  }
+  return focus === "news" || focus === "hourly-news" ? 0.5 : 0;
+}
 
 /** Šance, že AI zazpívá / zanotuje název další písničky (jen u hlasu s emocemi). */
 const SING_CHANCE = 0.15;
@@ -1292,6 +1341,43 @@ const TIME_PHRASE = new RegExp(
   `(?<![\\p{L}])(?:půl (?:${HOUR_ORD.join("|")})|(?:tři čtvrtě|čtvrt) na (?:${HOUR_ACC.join("|")})|chvíli po (?:${HOUR_ORD.join("|")})|je skoro (?:${HOUR_NOM.join("|")})|(?<!(?:^|[^\\p{L}])(?:v|ve|do|od|po|před|kolem|až|o|na|za) )(?:${HOUR_NOM.join("|")})(?: hodin[ay]?)? (?:ráno|dopoledne|odpoledne|večer|v noci))(?![\\p{L}])`,
   "giu",
 );
+/** Hodina ze slova v jakémkoli pádu („sedm“, „sedmi“ → 7) — null, když to hodina není. */
+const HOUR_FORMS: Record<string, number> = {
+  jedna: 1, jedne: 1, jednu: 1, dve: 2, dvou: 2, tri: 3, ctyri: 4, ctyr: 4,
+  pet: 5, peti: 5, sest: 6, sesti: 6, sedm: 7, sedmi: 7, osm: 8, osmi: 8,
+  devet: 9, deviti: 9, deset: 10, deseti: 10, jedenact: 11, jedenacti: 11,
+  dvanact: 12, dvanacti: 12, poledne: 12, pulnoc: 0, pulnoci: 0,
+};
+export function hourOf(word: string): number | null {
+  const w = word.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return w in HOUR_FORMS ? HOUR_FORMS[w]! : null;
+}
+
+/** „do sedm večer“ → „do sedmi večer“ (model často splete pád; význam je stejný). */
+const HOUR_GEN: Record<string, string> = {
+  jedna: "jedné", dvě: "dvou", tři: "tří", čtyři: "čtyř", pět: "pěti", šest: "šesti",
+  sedm: "sedmi", osm: "osmi", devět: "devíti", deset: "deseti", jedenáct: "jedenácti", dvanáct: "dvanácti",
+};
+export function fixHourCase(text: string): string {
+  return text.replace(
+    /(?<![\p{L}])([Dd]o) (jedna|dvě|tři|čtyři|pět|šest|sedm|osm|devět|deset|jedenáct|dvanáct)(?= (?:ráno|dopoledne|odpoledne|večer|v noci|hodin))/gu,
+    (_, d: string, h: string) => `${d} ${HOUR_GEN[h]}`,
+  );
+}
+
+/** Rozkaz v tykání → vykání (posluchačům se vyká). */
+const IMPERATIVE_VY: Record<string, string> = {
+  užij: "užijte", poslouchej: "poslouchejte", pošli: "pošlete", napiš: "napište",
+  přidej: "přidejte", zapni: "zapněte", zesil: "zesilte", dej: "dejte", nech: "nechte",
+  pusť: "pusťte", tancuj: "tancujte", zpívej: "zpívejte", vezmi: "vezměte", měj: "mějte",
+  zůstaň: "zůstaňte", vydrž: "vydržte", přej: "přejte", piš: "pište", ozvi: "ozvěte",
+  sleduj: "sledujte", odpočiň: "odpočiňte", jeď: "jeďte", pojď: "pojďte",
+};
+const TY_IMPERATIVE = new RegExp(
+  `(?<![\\p{L}])(?:${Object.keys(IMPERATIVE_VY).join("|")})(?![\\p{L}])`,
+  "giu",
+);
+
 export function timePhrases(text: string): string[] {
   return [...text.toLowerCase().matchAll(TIME_PHRASE)].map((m) => m[0]);
 }
@@ -1587,6 +1673,7 @@ export class AiDj {
       todayAllowance,
       usedToday,
       canSpeak,
+      canSpeakEssential: usedThisMonth + SEGMENT_CHARS_ESTIMATE <= monthlyLimit,
       credits,
       advice: this.advice(Math.max(0, monthlyLimit - usedThisMonth), daysLeft),
     };
@@ -1944,6 +2031,46 @@ export class AiDj {
     }
   }
 
+  /**
+   * Jednoduchý vstup ze šablony, když model ani na třetí pokus nenapíše text bez chyb.
+   * Jen fakta, která známe — žádná AI. Null = není co uvést.
+   */
+  private fallbackScript(ctx: DjContext, dialog: boolean): string | null {
+    const nx = ctx.next;
+    if (!nx) return null;
+    const song = `${nx.artist} s písní ${nx.title}`;
+    const names = ctx.hosts.map((h) => h.name);
+    if (ctx.focus === "handover" && ctx.handover) {
+      const h = ctx.handover;
+      const facts = this.handoverFacts(h, new Date(h.at ?? ctx.airAt ?? Date.now()));
+      const out: string[] = [];
+      for (const l of h.leaving.filter((n) => names.includes(n))) {
+        const back = facts.returnsLater[l];
+        out.push(
+          `${l}: ${back ? `Já zatím končím, vrátím se ${back}.` : "Já se pro dnes odpojuju."} Díky, že jste poslouchali.`,
+        );
+      }
+      const who = names.find((n) => !h.leaving.includes(n));
+      if (who) {
+        const plan =
+          facts.alone?.name === who && facts.alone.until
+            ? ` Teď jsem tu sám ${facts.alone.until}.`
+            : facts.togetherUntil
+              ? ` Teď jsme tu spolu ${facts.togetherUntil}.`
+              : "";
+        const hello = h.arriving.includes(who) ? `Ahoj, tady ${who}.` : "Díky a měj se hezky!";
+        out.push(`${who}: ${hello}${plan} Pouštím vám ${song}.`);
+      } else {
+        out.push(`${names[0]}: Na závěr pouštím ${song}.`);
+      }
+      return dialog
+        ? out.join("\n")
+        : out.map((l) => l.replace(/^[^:\n]{1,40}:\s*/, "")).join(" ");
+    }
+    const text = nx.requestFrom ? `${nx.requestFrom} si přeje ${song}. Je to tady.` : `A teď ${song}.`;
+    return dialog ? `${names[0]}: ${text}` : text;
+  }
+
   /** Fakta k předávce: kdo končí (a zda se vrátí), kdo zůstává, do kdy spolu / sám, kdo přijde pak. */
   handoverFacts(
     h: { leaving: string[]; arriving: string[]; staying?: string[] },
@@ -2206,10 +2333,11 @@ export class AiDj {
       const parts: Buffer[] = [];
       for (const line of lines) {
         const dict = parsePronunciations(this.settings.pronunciations ?? "");
-        const { audio, cost } = await this.speak(forSpeech(line.text, dict), {
-          key,
-          voiceId: line.voiceId,
-        });
+        const { audio, cost } = await this.speak(
+          forSpeech(line.text, dict),
+          { key, voiceId: line.voiceId },
+          voiceStability(ctx.focus),
+        );
         parts.push(audio);
         spent += cost ?? line.text.length;
       }
@@ -2373,7 +2501,7 @@ export class AiDj {
         ? this.memory.quiz
         : null;
     if (quiz && ctx.focus !== "quiz") this.pending.quizAnswered = true;
-    if (ctx.focus === "quiz" && ctx.next?.year) {
+    if (ctx.focus === "quiz" && ctx.quizKind !== "artist" && ctx.next?.year) {
       this.pending.quizAsk = {
         artist: ctx.next.artist,
         title: ctx.next.title,
@@ -2444,8 +2572,8 @@ export class AiDj {
             `Každá replika musí dávat smysl jako odpověď na tu předchozí — kdo ji čte samostatně, pozná, na co reaguje. Žádná replika nesmí být obecná vata („ty hity se povedly“).`,
             `Mluv jen o písničkách a interpretech z podkladů — žádné jiné skladby ani alba si nevymýšlej. Nevymýšlej si ani společné zážitky („včera jsme…“).`,
             `Rozhovor končí uvedením další písničky (interpret a název) — ne otázkou a ne „co si dáme dál“.`,
-            `Krátké reakce („Jo jo.“, „No jasně!“, „Fakt?“) a smích [laughs] / [chuckles] jsou fajn, když sedí.`,
-            `Příklad (jiný obsah, jen ukázka toku): „${a!.name}: Je pátek večer, co, už máš plány na víkend?\n${b!.name}: [laughs] Gauč a deka, venku jsou dva stupně. Tak ať se aspoň něco hejbe — tady je Avicii a Levels.“`,
+            `Krátké reakce („Jo jo.“, „No jasně!“, „Fakt?“) jsou fajn. Smích [laughs] / [chuckles] jen jako reakce na vtip v předchozí replice — ne jen tak.`,
+            `Příklad (jiný obsah, jen ukázka toku): „${a!.name}: Je pátek večer, co, už máš plány na víkend?\n${b!.name}: Gauč a deka, venku jsou dva stupně. Tak ať se aspoň něco hejbe — tady je Avicii a Levels.“`,
           ]
             .filter(Boolean)
             .join("\n")
@@ -2471,6 +2599,10 @@ export class AiDj {
           vibe: "nálada — krátký osobní komentář k denní době, dni nebo písničce, pak uvedení další",
           invite:
             "pozvi posluchače, ať si na webu rádia přejí písničku nebo pošlou vzkaz či hlasovku do studia",
+          "quiz-answer": "odpověď na kvíz",
+          "quiz-winners": "vítězové kvízového týdne",
+          question: "otázka dne",
+          "question-read": "odpovědi na otázku dne",
           quiz: "hudební kvíz — zeptej se posluchačů, z kterého roku je písnička, která teď začíná. Rok NEPROZRAZUJ a nenapovídej (žádné „letos slaví … let“, žádné tipy na rok ani desetiletí) — odpověď zazní v příštím vstupu. U rozhovoru se ptá jeden a druhý jen přizvukuje (třeba že to ví, ale neřekne) a uvede písničku. Tipy ať lidi posílají jako vzkaz na webu rádia",
           "hourly-news":
             "zprávy v celou hodinu — začni oznámením hodiny, pak jedna až dvě zprávy",
@@ -2631,9 +2763,180 @@ export class AiDj {
         ? `Tvoje poslední vstupy s pražským časem (neopakuj z nich fakta, zprávy, stupně, vtipy, obraty ani začátek; jen výjimečně můžeš krátce navázat, třeba „jak jsem říkal před chvílí…“):\n${recent.map((r) => `- ${r}`).join("\n")}`
         : null,
       emotions
-        ? `Emoce: použij 2 až 3 tagy v hranatých závorkách (aspoň jeden vždy), ať vstup zní živě, které hlas zahraje (${EMOTION_TAGS.map((t) => `[${t}]`).join(", ")}). Tag patří PŘED větu, kterou má zabarvit — nikdy na konec. Střídej je, ne pořád stejný. Tón ber podle písničky, která začíná: klidná, pomalá nebo smutná → [calm], [warmly], [whispers]; energická, taneční nebo pecka → [excited], [happy].`
+        ? `Emoce jsou důležité — moderátor nemá text číst, ale prožívat ho. Tagy v hranatých závorkách hlas zahraje (${EMOTION_TAGS.map((t) => `[${t}]`).join(", ")}). Použij 2 až 3 tagy (v rozhovoru aspoň jeden v každé replice), každý PŘED větu, ke které obsahem sedí: radost z písničky → [excited] / [cheerfully], pozdrav a vzkaz posluchače → [warmly], otázka na kolegu → [curious], popíchnutí → [mischievously] / [playfully], úleva nebo „konečně pátek“ → [exhales], reakce na vtip → [laughs] / [chuckles] (smích jen po vtipu, nikdy jen tak). Piš mluveně, ať je co hrát: zvolání („No teda!“, „Jo!“), krátká pauza třemi tečkami („a teď… pořádná pecka“), citoslovce („Jé“, „Hm“, „Páni“). Střídej je, ne pořád stejný. Tón ber podle písničky, která začíná: klidná, pomalá nebo smutná → [calm], [warmly], [whispers]; energická, taneční nebo pecka → [excited], [happy].`
         : null,
     ].filter(Boolean);
+
+    const pickOne = <T,>(xs: T[]) => xs[Math.floor(Math.random() * xs.length)]!;
+    const tagged = (t: string) => cleanTags(t, emotions);
+    // Kvíz na interpreta — interpret nesmí zaznít, na webu je schovaný.
+    if (ctx.focus === "quiz" && ctx.quizKind === "artist" && ctx.next) {
+      const t = ctx.next.title;
+      if (dialog) {
+        const [q, r] = pickOne([
+          [
+            `[curious] Hudební kvíz! Kdo zpívá písničku, která teď začíná? Jmenuje se ${t}.`,
+            `[mischievously] Interpreta jsme na webu schovali, tak žádné podvádění. Tipněte si v kvízu, odpověď řekneme hned po písničce. [excited] Jedeme!`,
+          ],
+          [
+            `[playfully] Tak schválně… Kdo je za písničkou ${t}?`,
+            `[chuckles] Neprozradím. Na webu se vám otevřel kvíz, napište tip a hned po písničce se dozvíte, kdo měl pravdu. [cheerfully] Tady je!`,
+          ],
+        ]);
+        return [
+          { name: a!.name, voiceId: a!.voiceId, text: tagged(q!) },
+          { name: b!.name, voiceId: b!.voiceId, text: tagged(r!) },
+        ];
+      }
+      const text = pickOne([
+        `[curious] Hudební kvíz! Kdo zpívá písničku, která teď začíná? Jmenuje se ${t}. [cheerfully] Tipněte si v kvízu na webu, odpověď řeknu hned po ní.`,
+        `[playfully] Tak schválně… Kdo je za písničkou ${t}? [warmly] Interpreta jsme na webu schovali, pošlete tip v kvízu a hned po písničce se dozvíte, kdo měl pravdu.`,
+      ]);
+      return [{ name: a!.name, voiceId: a!.voiceId, text: tagged(text) }];
+    }
+
+    // Kvíz ze šablony — model otázku pořád zamlžoval nebo prozrazoval rok.
+    if (ctx.focus === "quiz" && ctx.next?.year) {
+      const song = `${ctx.next.artist}, ${ctx.next.title}`;
+      if (dialog) {
+        const [q, r] = pickOne([
+          [
+            `[curious] Hudební kvíz! Z kterého roku je písnička, která teď začíná? ${song}.`,
+            `[mischievously] Já to vím, ale neprozradím. Tipněte si rok v kvízu na webu, odpověď řekneme hned po písničce. [excited] Jedeme!`,
+          ],
+          [
+            `[playfully] Tak schválně… Kdy tahle písnička vyšla? ${song}.`,
+            `[chuckles] Napovídat nebudu. Na webu se vám právě otevřel kvíz, pošlete tip a hned po písničce se dozvíte, kdo měl pravdu. [cheerfully] Tady je!`,
+          ],
+          [
+            `[curious] Kvízová otázka pro vás: ve kterém roce vyšla písnička ${song}?`,
+            `[warmly] Tip pošlete v kvízu na webu Miss Radio, máte na to celou písničku. Odpověď hned po ní. [excited] Poslouchejte!`,
+          ],
+        ]);
+        return [
+          { name: a!.name, voiceId: a!.voiceId, text: tagged(q!) },
+          { name: b!.name, voiceId: b!.voiceId, text: tagged(r!) },
+        ];
+      }
+      const text = pickOne([
+        `[curious] Hudební kvíz! Z kterého roku je písnička, která teď začíná? ${song}. [cheerfully] Tipněte si v kvízu na webu, odpověď řeknu hned po ní.`,
+        `[playfully] Tak schválně… Ve kterém roce vyšla tahle písnička? ${song}. [warmly] Na webu se vám otevřel kvíz, pošlete tip a hned po písničce se dozvíte, kdo měl pravdu.`,
+      ]);
+      return [{ name: a!.name, voiceId: a!.voiceId, text: tagged(text) }];
+    }
+
+    // Uvedení další písničky na konci šablonových vstupů.
+    const nextIntro = () => {
+      const nx = ctx.next;
+      if (!nx) return "";
+      return nx.requestFrom
+        ? `[warmly] A teď si ${nx.requestFrom} přeje ${nx.artist} s písní ${nx.title}.`
+        : `[cheerfully] A teď ${nx.artist} s písní ${nx.title}.`;
+    };
+    const pts = (n: number) => `${n} ${n === 1 ? "bod" : n >= 2 && n <= 4 ? "body" : "bodů"}`;
+    const says = (lines: string[]) =>
+      dialog
+        ? [
+            { name: a!.name, voiceId: a!.voiceId, text: tagged(lines[0]!) },
+            { name: b!.name, voiceId: b!.voiceId, text: tagged(lines.slice(1).join(" ").trim()) },
+          ]
+        : [{ name: a!.name, voiceId: a!.voiceId, text: tagged(lines.join(" ").trim()) }];
+
+    // Otázka dne — ze šablony (otázka je přesně ta, co je na webu).
+    if (ctx.focus === "question" && ctx.dayQuestion) {
+      const q = ctx.dayQuestion.text;
+      return says([
+        pickOne([
+          `[curious] Máme pro vás otázku dne: ${q}`,
+          `[playfully] Tak a otázka dne zní… ${q}`,
+        ]),
+        pickOne([
+          `[warmly] Odpovědi pište na webu Miss Radio v záložce Kvíz, ty nejlepší pak přečteme ve vysílání.`,
+          `[cheerfully] Odpověď nám napište na webu v záložce Kvíz, za chvíli si pár z nich přečteme.`,
+        ]),
+        nextIntro(),
+      ]);
+    }
+
+    // Čtení odpovědí na otázku dne — skutečné texty z webu (prošly filtrem).
+    if (ctx.focus === "question-read" && ctx.dayQuestion?.answers?.length) {
+      const q = ctx.dayQuestion.text;
+      const read = ctx.dayQuestion.answers
+        .map((x) => {
+          const text = /[.!?…]$/.test(x.text) ? x.text : `${x.text}.`;
+          return x.name ? `${x.name} píše: ${text}` : `Jeden z vás píše: ${text}`;
+        })
+        .join(" ");
+      return says([
+        `[curious] Otázka dne zněla: ${q} [warmly] Tady jsou vaše odpovědi.`,
+        `${read} [cheerfully] Díky moc za ně!`,
+        nextIntro(),
+      ]);
+    }
+
+    // Vítězové kvízového týdne — neděle večer.
+    if (ctx.focus === "quiz-winners" && ctx.quizBoard?.length) {
+      const [first, second, third] = ctx.quizBoard;
+      const rest = second
+        ? ` Druhé místo: ${second.name}${third ? `, třetí ${third.name}` : ""}.`
+        : "";
+      return says([
+        `[excited] Je neděle večer a máme vítěze kvízového týdne! Nejvíc bodů, ${pts(first!.points)}, má ${first!.name}.`,
+        `[cheerfully] Gratulujeme!${rest} Od pondělí se hraje znovu od nuly.`,
+        nextIntro(),
+      ]);
+    }
+
+    // Odpověď na kvíz ze šablony — přesný rok a skutečná jména z webu, nic vymyšleného.
+    if (ctx.focus === "quiz-answer" && ctx.quizResult) {
+      const r = ctx.quizResult;
+      const names = (xs: string[]) =>
+        xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} a ${xs[xs.length - 1]}`;
+      const said = r.winners.slice(0, 3);
+      const reveal =
+        r.kind === "artist"
+          ? pickOne([
+              `[excited] Kvíz má výsledek! Písnička ${r.title} je od ${r.artist}.`,
+              `[cheerfully] A odpověď na kvíz: za písničkou ${r.title} je ${r.artist}.`,
+            ])
+          : pickOne([
+              `[excited] Kvíz má výsledek! ${r.artist}, ${r.title} vyšla v roce ${r.year}.`,
+              `[cheerfully] A odpověď na kvíz: písnička ${r.title} vyšla v roce ${r.year}.`,
+              `[curious] Tak co, víte to? ${r.title} od ${r.artist} je z roku ${r.year}!`,
+            ]);
+      let verdict: string;
+      if (r.right && !said.length) verdict = `[cheerfully] Správných tipů: ${r.right}, gratulujeme!`;
+      else if (r.right > 3 && said.length)
+        verdict = `[cheerfully] Správných tipů: ${r.right}! Body berou třeba ${names(said)}. Gratulujeme!`;
+      else if (said.length === 1)
+        verdict = pickOne([
+          `[cheerfully] Bod za správnou odpověď bere ${said[0]}. Gratulujeme!`,
+          `[excited] Trefa! Správně to má ${said[0]}, gratulujeme!`,
+        ]);
+      else if (said.length)
+        verdict = pickOne([
+          `[cheerfully] Body za správnou odpověď berou ${names(said)}. Gratulujeme!`,
+          `[excited] Trefili to ${names(said)}, gratulujeme!`,
+        ]);
+      else if (r.closest)
+        verdict = r.closest.name
+          ? `[playfully] Tentokrát to nikdo netrefil. Nejblíž: ${r.closest.name} s tipem ${r.closest.year}.`
+          : `[playfully] Tentokrát to nikdo netrefil, nejbližší tip byl ${r.closest.year}.`;
+      else if (r.total) verdict = `[playfully] Tentokrát to nikdo neuhodl… tak příště!`;
+      else verdict = `[playfully] Tentokrát nepřišel žádný tip… tak příště!`;
+      const nx = ctx.next;
+      const intro = nx
+        ? nx.requestFrom
+          ? `[warmly] A teď si ${nx.requestFrom} přeje ${nx.artist} s písní ${nx.title}.`
+          : `[cheerfully] A teď ${nx.artist} s písní ${nx.title}.`
+        : "";
+      if (dialog)
+        return [
+          { name: a!.name, voiceId: a!.voiceId, text: tagged(reveal) },
+          { name: b!.name, voiceId: b!.voiceId, text: tagged(`${verdict} ${intro}`.trim()) },
+        ];
+      return [{ name: a!.name, voiceId: a!.voiceId, text: tagged(`${reveal} ${verdict} ${intro}`.trim()) }];
+    }
 
     const prompt = `Podklady:\n${lines.join("\n")}\n\nNapiš jeden ${dialog ? "rozhovor" : "vstup"}.`;
     // `other`: poslední pokus jiným modelem (ten první psal pořád s chybami).
@@ -2657,7 +2960,77 @@ export class AiDj {
           "",
         )
         .trim();
+    // Chyby, u kterých známe správnou odpověď, se opraví rovnou — nezahazovat kvůli nim celý vstup.
+    const handoverFactsNow =
+      ctx.focus === "handover" && ctx.handover
+        ? this.handoverFacts(ctx.handover, new Date(ctx.handover.at ?? ctx.airAt ?? Date.now()))
+        : null;
+    const DAYPART = "(?:ráno|dopoledne|odpoledne|večer|v noci)";
+    const repair = (text: string): string => {
+      let t = text;
+      // Špatný hovorový čas → ten správný („půl sedmé“ v 17:46 → „tři čtvrtě na šest“).
+      if (sayTime) {
+        const right = timeNow
+          .replace(/^(je|jsou) /i, "")
+          .replace(new RegExp(` ${DAYPART}$`), "");
+        for (const said of timePhrases(t)) {
+          if (timeNow.toLowerCase().includes(said)) continue;
+          const bare = said.replace(/^je /, "");
+          const re = new RegExp(bare.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+          t = t.replace(re, (m) => (m[0] === m[0]!.toUpperCase() ? right[0]!.toUpperCase() + right.slice(1) : right));
+        }
+      }
+      // „sám do X“ / „spolu do X“ → přesně podle rozpisu směn.
+      const f = handoverFactsNow;
+      // Jen když za „do“ opravdu stojí hodina („sám do studia“ nechat být).
+      const until = (who: "sám" | "spolu", right: string) => {
+        t = t.replace(
+          new RegExp(`(?<![\\p{L}])${who} do (\\p{L}+)(?: ${DAYPART})?`, "giu"),
+          (m, w: string) => (hourOf(w) === null ? m : `${m.slice(0, who.length)} ${right}`),
+        );
+      };
+      if (f?.alone?.until) until("sám", f.alone.until);
+      if (f?.togetherUntil) until("spolu", f.togetherUntil);
+      // Zkomolená rubrika („Retro párátko“).
+      if (retro) t = t.replace(/Retro\s+(?!pátek)\p{L}+/giu, "Retro pátek");
+      // Smích k počasí, zprávám nebo statistikám nesedí („[laughs] Tak si to užij…“).
+      if (["time-weather", "news", "hourly-news", "daily-summary", "invite"].includes(ctx.focus))
+        t = t.replace(/\[(laughs( harder)?|chuckles)\]\s*/gi, "");
+      // Replika bez emoce zní jako čtení → doplnit tag podle obsahu.
+      if (emotions) {
+        const pick = (line: string) =>
+          /\?/.test(line)
+            ? "curious"
+            : (ctx.next?.requestFrom && line.includes(ctx.next.requestFrom)) || /zdrav|vzkaz|přeje|přání/i.test(line)
+              ? "warmly"
+              : night
+                ? "calm"
+                : (ctx.next?.energy ?? 3) >= 4
+                  ? "excited"
+                  : "cheerfully";
+        const addTag = (line: string) => {
+          if (!line.trim() || /\[[a-z ]{2,20}\]/i.test(line)) return line;
+          // Rozhovor: tag až za „Jméno:“. Sólo: na začátek celého textu.
+          const m = dialog ? /^(\s*[^:\n]{1,40}:\s*)([\s\S]*)$/.exec(line) : null;
+          return m ? `${m[1]}[${pick(m[2]!)}] ${m[2]}` : `[${pick(line)}] ${line.trimStart()}`;
+        };
+        t = dialog ? t.split("\n").map(addTag).join("\n") : addTag(t);
+      }
+      // Posluchačům se vyká: „Tak si to užij, teď vám pouštím…“ → „užijte“.
+      // Sólo vždy (kolega tam není), v rozhovoru jen ve větě, která mluví k posluchačům.
+      t = t.replace(/[^.!?…\n]+[.!?…]*/g, (sentence) => {
+        if (dialog && !/(?<![\p{L}])(vám|vás|vy|posluchač\p{L}*)(?![\p{L}])/iu.test(sentence))
+          return sentence;
+        return sentence.replace(TY_IMPERATIVE, (m) => {
+          const plural = IMPERATIVE_VY[m.toLowerCase()]!;
+          return m[0] === m[0]!.toUpperCase() ? plural[0]!.toUpperCase() + plural.slice(1) : plural;
+        });
+      });
+      return t;
+    };
     let body = "";
+    // Záložní šablona (model selhal) — korektor ji už nepřepisuje.
+    let plain = false;
     // Zakázané fráze → napsat znovu (nejvýš 3 pokusy, pak se vezme poslední).
     // Rozhovor: písnička patří až na konec, ne na začátek, a nekončí otázkou.
     const fold = (s: string) =>
@@ -2705,7 +3078,7 @@ export class AiDj {
         : text.replace(/\[[^\]]{1,24}\]/g, "").length;
       if (longest > limit)
         hits.push(`moc dlouhé (${longest} znaků, max ${limit}) — zkrať`);
-      if (ctx.focus === "quiz" && ctx.next?.year) {
+      if (ctx.focus === "quiz" && ctx.quizKind !== "artist" && ctx.next?.year) {
         const y = ctx.next.year;
         if (
           text.includes(y) ||
@@ -2830,15 +3203,23 @@ export class AiDj {
         }
         const word = (w: string | null) =>
           w?.replace(/^do /, "").split(" ")[0] ?? "";
+        const sameHour = (x: string, y: string) => {
+          const hx = hourOf(x);
+          return hx !== null ? hx === hourOf(y) : fold(x) === fold(y);
+        };
         if (facts.alone?.until && ctx.hosts.some((h) => h.name === facts.alone!.name)) {
           const own = text.split(/\n+/).find((x) => x.trim().startsWith(`${facts.alone!.name}:`)) ?? "";
-          if (!fold(own).includes(fold(word(facts.alone.until))))
+          const want = hourOf(word(facts.alone.until));
+          if (
+            !fold(own).includes(fold(word(facts.alone.until))) &&
+            !(fold(own).match(/\p{L}+/gu) ?? []).some((w) => want !== null && hourOf(w) === want)
+          )
             hits.push(`${facts.alone.name} neřekl, jak to bude dál (je tu sám ${facts.alone.until})`);
         }
         const aloneM = /\bsám do (\p{L}+)/iu.exec(text);
         if (
           aloneM &&
-          (!facts.alone || fold(aloneM[1]!) !== fold(word(facts.alone.until)))
+          (!facts.alone || !sameHour(aloneM[1]!, word(facts.alone.until)))
         )
           hits.push(
             facts.alone?.until
@@ -2857,14 +3238,14 @@ export class AiDj {
             );
           if (mentions && tm && facts.togetherUntil) {
             const got = tm[1] ?? tm[3]!;
-            if (got !== fold(word(facts.togetherUntil)))
+            if (!sameHour(got, word(facts.togetherUntil)))
               hits.push(
                 `s kolegou bude jen ${facts.togetherUntil}, ne „do ${got}“`,
               );
           }
         }
         const togM = /\bspolu do (\p{L}+)/iu.exec(text);
-        if (togM && fold(togM[1]!) !== fold(word(facts.togetherUntil)))
+        if (togM && !sameHour(togM[1]!, word(facts.togetherUntil)))
           hits.push(
             facts.togetherUntil
               ? `„spolu do ${togM[1]}“ — spolu budou jen ${facts.togetherUntil}`
@@ -2980,6 +3361,10 @@ export class AiDj {
     const variants = urgent ? 1 : 3;
     let lastIssues: string[] = [];
     const ATTEMPTS = 3;
+    // Drobnosti (opakovaný obrat, ohraná fráze, délka) — kvůli nim se zkouší znovu, ale verze s nimi
+    // je pořád lepší než šablona, když poslední (slabší) model napíše nesmysl.
+    const SOFT = /^(opakuje obraty|ohraná fráze|moc dlouhé|stejný začátek|víc než 2 repliky)/;
+    let bestSoft: { text: string; n: number } | null = null;
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
       const extra =
         attempt && body
@@ -2995,7 +3380,7 @@ export class AiDj {
         .filter(
           (r): r is PromiseFulfilledResult<string> => r.status === "fulfilled",
         )
-        .map((r) => unthink(r.value))
+        .map((r) => repair(fixHourCase(unthink(r.value))))
         .filter((t) => t.length > 10);
       if (!drafts.length) throw new Error("Model nevrátil žádný text.");
       // Slovník: slova, která čeština nezná („přáhá“, „žáběr“) — jeden podproces pro všechny verze.
@@ -3015,14 +3400,28 @@ export class AiDj {
         // Ta s nejmenším počtem chyb (ne náhodně první).
         body = [...drafts].sort((x, y) => issues(x).length - issues(y).length)[0]!;
         lastIssues = issues(body);
+        for (const d of drafts) {
+          const is = issues(d);
+          if (is.every((i) => SOFT.test(i)) && (!bestSoft || is.length < bestSoft.n))
+            bestSoft = { text: d, n: is.length };
+        }
         // Po posledním pokusu: drobnosti (opakovaný obrat, délka) projdou, ale nesmysly,
         // neexistující slova a nepravdy do éteru nepustit — radši ticho.
         if (attempt === ATTEMPTS - 1) {
-          const soft = /^(opakuje obraty|ohraná fráze|moc dlouhé|stejný začátek|víc než 2 repliky)/;
-          const hard = lastIssues.filter((i) => !soft.test(i));
-          if (hard.length) {
-            radioLog("🤖", c.yellow(`AI vstup vynechán — po ${ATTEMPTS} pokusech pořád chyby (${hard.join(", ")})`));
-            throw new Error(`Vstup se nepovedl napsat bez chyb (${hard.slice(0, 3).join(", ")}).`);
+          const hard = lastIssues.filter((i) => !SOFT.test(i));
+          if (hard.length && bestSoft) {
+            radioLog("🤖", c.yellow(`AI vstup: poslední pokus chyboval (${hard.join(", ")}) — beru dřívější verzi jen s drobnostmi`));
+            body = bestSoft.text;
+          } else if (hard.length) {
+            const fb = this.fallbackScript(ctx, dialog);
+            if (!fb) {
+              radioLog("🤖", c.yellow(`AI vstup vynechán — po ${ATTEMPTS} pokusech pořád chyby (${hard.join(", ")})`));
+              throw new Error(`Vstup se nepovedl napsat bez chyb (${hard.slice(0, 3).join(", ")}).`);
+            }
+            // Radši jednoduché správné uvedení než ticho nebo nesmysl.
+            radioLog("🤖", c.yellow(`AI vstup nahrazen jednoduchým uvedením — model pořád chyboval (${hard.join(", ")})`));
+            body = fb;
+            plain = true;
           }
           break;
         }
@@ -3051,7 +3450,7 @@ export class AiDj {
       break;
     }
     // Druhý průchod: korektor češtiny. Když selže nebo text rozbije, zůstane původní.
-    try {
+    if (!plain) try {
       const fixed = unthink(
         await ask(
           `${dialog ? "Rozhovor" : "Vstup"} k opravě:\n${body}`,
@@ -3083,6 +3482,8 @@ export class AiDj {
         err instanceof Error ? err.message : err,
       );
     }
+    // Korektor občas tagy (emoce) vypustí → znovu doplnit a dorovnat.
+    body = repair(body);
     const clean = (s: string) =>
       s
         .replace(/\[[^\]]{1,24}\]/g, (tag) => cleanTags(tag, emotions))
@@ -3320,6 +3721,7 @@ export class AiDj {
   private async speak(
     text: string,
     voice: { key: string; voiceId: string },
+    stability = 0.5,
   ): Promise<{ audio: Buffer; cost: number | null }> {
     const chain = [
       ...new Set([voiceModel(), "eleven_v3", "eleven_multilingual_v2"]),
@@ -3331,6 +3733,7 @@ export class AiDj {
           model,
           supportsTags(model) ? text : cleanTags(text, false),
           voice,
+          stability,
         );
       } catch (err) {
         lastErr = err;
@@ -3347,6 +3750,7 @@ export class AiDj {
     model: string,
     text: string,
     voice: { key: string; voiceId: string },
+    stability = 0.5,
   ): Promise<{ audio: Buffer; cost: number | null }> {
     const res = await fetchOrExplain(
       "ElevenLabs",
@@ -3362,9 +3766,9 @@ export class AiDj {
           text,
           model_id: model,
           language_code: "cs",
-          // v3 bere jen stabilitu 0 / 0.5 / 1 (0.5 = přirozená, emoce z tagů).
+          // v3/v4 berou jen stabilitu 0 / 0.5 / 1 (0 = nejvíc emocí, 0.5 = přirozená).
           voice_settings: supportsTags(model)
-            ? { stability: 0.5 }
+            ? { stability }
             : {
                 stability: 0.45,
                 similarity_boost: 0.85,
@@ -3394,10 +3798,20 @@ let lastFocus: AiDjFocus | null = null;
 /** Vážený náhodný výběr tématu — stejné téma dvakrát po sobě nepadne. */
 export function pickFocus(
   round: number,
-  opts: { news: boolean; weather: boolean; hasNotes: boolean; quiz?: boolean },
+  opts: {
+    news: boolean;
+    weather: boolean;
+    hasNotes: boolean;
+    quiz?: boolean;
+    /** Otázka dne ještě dnes nezazněla. */
+    question?: boolean;
+    /** Na otázku dne přišly odpovědi a je čas je přečíst. */
+    questionRead?: boolean;
+  },
 ): AiDjFocus {
-  // Vzkaz posluchače má přednost — ať nečeká.
+  // Vzkaz posluchače má přednost — ať nečeká. Pak odpovědi na otázku dne.
   if (opts.hasNotes && round % 2 === 0) return (lastFocus = "listeners");
+  if (opts.questionRead) return (lastFocus = "question-read");
   const weights: [AiDjFocus, number][] = [
     ["music", 3],
     ["vibe", 3],
@@ -3405,6 +3819,8 @@ export function pickFocus(
     ["news", opts.news ? 0.5 : 0],
     ["invite", 1],
     ["quiz", opts.quiz ? 1 : 0],
+    // Otázka dne: jednou denně, ať zazní spíš dřív než později.
+    ["question", opts.question ? 2 : 0],
   ];
   const pool = weights.filter(([f, w]) => w > 0 && f !== lastFocus);
   const sum = pool.reduce((a, [, w]) => a + w, 0);

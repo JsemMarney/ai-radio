@@ -274,6 +274,7 @@ async function handleRequest(
     url.pathname === "/requests/voice" ||
     url.pathname === "/listener-stats" ||
     url.pathname === "/ai-dj" ||
+    url.pathname === "/activities/moderation" ||
     url.pathname === "/schedule";
 
   if (isControlRoute && !verifyBrokerRequest(req)) {
@@ -429,6 +430,92 @@ async function handleRequest(
     return;
   }
 
+  // Týdenní žebříček kvízu a otázka dne (veřejné čtení).
+  if (req.method === "GET" && url.pathname === "/activities") {
+    sendJson(res, 200, engine.getActivities());
+    return;
+  }
+
+  // Studio: kontrola odpovědí, tipů a žebříčku.
+  if (req.method === "GET" && url.pathname === "/activities/moderation") {
+    sendJson(res, 200, engine.getActivityModeration());
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/activities/moderate") {
+    try {
+      const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+      const result = engine.moderateActivity({ target: body.target, id: body.id, hidden: body.hidden });
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { ok: false, error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  // Upozornění na kvíz: veřejný klíč (GET) a přihlášení / odhlášení odběru (POST přes broker).
+  if (req.method === "GET" && url.pathname === "/push") {
+    sendJson(res, 200, { publicKey: await engine.push.publicKey() });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/push") {
+    try {
+      const body = JSON.parse(await readBody(req)) as { endpoint?: unknown; off?: unknown; site?: unknown };
+      if (typeof body.endpoint !== "string") {
+        sendJson(res, 400, { ok: false, error: "Chybí odběr." });
+        return;
+      }
+      if (body.off === true) {
+        await engine.push.unsubscribe(body.endpoint);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      const result = await engine.push.subscribe(
+        body.endpoint,
+        typeof body.site === "string" ? body.site : undefined,
+      );
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { ok: false, error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  // Odpověď na otázku dne z webu (přes podepsaný broker).
+  if (req.method === "POST" && url.pathname === "/activities/answer") {
+    try {
+      const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+      const result = engine.answerQuestion({
+        name: body.name,
+        text: body.text,
+        voter: body.voter,
+        net: body.net,
+      });
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { ok: false, error: "Neplatný JSON." });
+    }
+    return;
+  }
+
+  // Tip do kvízu z webu (přes podepsaný broker — voter je otisk IP posluchače).
+  if (req.method === "POST" && url.pathname === "/quiz") {
+    try {
+      const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+      const result = engine.submitQuizAnswer({
+        id: body.id,
+        name: body.name,
+        year: body.year,
+        answer: body.answer,
+        voter: body.voter,
+        net: body.net,
+      });
+      sendJson(res, result.ok ? 200 : 400, result);
+    } catch {
+      sendJson(res, 400, { ok: false, error: "Neplatný JSON." });
+    }
+    return;
+  }
+
   // Hlasovka k přání — jen pro studio (přehrání do sluchátek).
   if (req.method === "GET" && url.pathname === "/requests/voice") {
     const file = voiceNotePath(url.searchParams.get("id") ?? "");
@@ -494,7 +581,15 @@ async function handleRequest(
   }
 
   if (url.pathname === "/ai-dj/now" && req.method === "POST") {
-    const result = await engine.aiDjNow();
+    // Studio: {"quiz":"year"|"artist"} = kvíz na další písničku.
+    let quiz: "year" | "artist" | undefined;
+    try {
+      const body = JSON.parse((await readBody(req)) || "{}") as { quiz?: unknown };
+      if (body.quiz === "year" || body.quiz === "artist") quiz = body.quiz;
+    } catch {
+      // prázdné tělo = běžný vstup
+    }
+    const result = await engine.aiDjNow({ quiz });
     sendJson(res, result.ok ? 200 : 400, result);
     return;
   }

@@ -43,6 +43,7 @@ export async function GET(request: Request) {
         moderatorOnAir: false,
         aiHost: null,
         tickerMessages: [],
+        quiz: null,
         bed: "builtin",
         bedLevelDb: -10,
         streamUrl: getPublicStreamUrl(origin),

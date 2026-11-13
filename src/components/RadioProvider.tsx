@@ -17,6 +17,7 @@ import type {
 } from "@/lib/types";
 import { buildProgramSchedule, pickNextScheduleTrack, sliceScheduleForDisplay } from "@/lib/program-schedule";
 import { STREAM_URL } from "@/lib/types";
+import type { PublicQuiz } from "@/lib/radio-engine";
 
 function recentKey(tracks: RadioNowPlaying[]): string {
   return tracks.map((t) => t.uuid).join("|");
@@ -179,6 +180,8 @@ type RadioContextValue = {
   aiHost: string | null;
   /** Vlastní texty do běžícího pruhu. */
   tickerMessages: string[];
+  /** Kvíz na webu, když ho moderátor vyhlásil. */
+  quiz: PublicQuiz | null;
   play: () => void;
   pause: () => void;
   toggle: () => void;
@@ -216,6 +219,7 @@ type StatusPayload = {
   moderatorOnAir?: boolean;
   aiHost?: string | null;
   tickerMessages?: string[];
+  quiz?: PublicQuiz | null;
 };
 
 const CONNECTION_DEBOUNCE_MS = 800;
@@ -337,6 +341,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
   const [moderator, setModerator] = useState<string | null>(null);
   const [moderatorOnAir, setModeratorOnAir] = useState(false);
   const [aiHost, setAiHost] = useState<string | null>(null);
+  const [quiz, setQuiz] = useState<PublicQuiz | null>(null);
   const [tickerMessages, setTickerMessages] = useState<string[]>([]);
   const [quality, setQualityState] = useState<StreamQuality>("auto");
   const [formats, setFormats] = useState<Formats>({ mp3: 0, aac: null, lo: null });
@@ -430,6 +435,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
     if (data.moderatorOnAir !== undefined) setModeratorOnAir(data.moderatorOnAir);
     if (data.aiHost !== undefined) setAiHost(data.aiHost);
     if (data.tickerMessages !== undefined) setTickerMessages(data.tickerMessages);
+    if (data.quiz !== undefined) setQuiz(data.quiz);
     if (data.formats) {
       const f = { mp3: data.formats.mp3, aac: data.formats.aac, lo: data.formats.lo ?? null };
       setFormats((prev) =>
@@ -854,6 +860,7 @@ export function RadioProvider({ children }: { children: ReactNode }) {
         moderatorOnAir,
         aiHost,
         tickerMessages,
+        quiz,
         play,
         pause,
         toggle,

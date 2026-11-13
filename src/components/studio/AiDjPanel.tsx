@@ -51,6 +51,10 @@ const FOCUS_LABEL: Record<string, string> = {
   vibe: "nálada",
   invite: "pozvánka",
   quiz: "kvíz",
+  "quiz-answer": "odpověď na kvíz",
+  "quiz-winners": "vítězové kvízu",
+  question: "otázka dne",
+  "question-read": "odpovědi na otázku dne",
   "hourly-news": "zprávy v celou",
   "voice-reply": "odpověď na hlasovku",
   request: "přání",
@@ -147,12 +151,16 @@ export function AiDjPanel() {
     }
   }
 
-  async function speakNow() {
+  async function speakNow(quiz?: "year" | "artist") {
     setBusy(true);
     const before = state?.lastAt ?? null;
-    setMessage({ ok: true, text: "Píšu a namlouvám vstup…" });
+    setMessage({ ok: true, text: quiz ? "Chystám kvíz…" : "Píšu a namlouvám vstup…" });
     try {
-      const res = await fetch("/api/radio/ai-dj/now", { method: "POST" });
+      const res = await fetch("/api/radio/ai-dj/now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(quiz ? { quiz } : {}),
+      });
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         error?: string;
@@ -162,7 +170,9 @@ export function AiDjPanel() {
         data.ok
           ? {
               ok: true,
-              text: "Píšu a namlouvám vstup — zazní na začátku další písničky.",
+              text: quiz
+                ? `Kvíz na ${quiz === "artist" ? "interpreta" : "rok"} — otázka zazní na začátku další písničky, posluchačům se na webu otevře kvíz.`
+                : "Píšu a namlouvám vstup — zazní na začátku další písničky.",
             }
           : { ok: false, text: data.error ?? "Vstup se nepovedl." },
       );
@@ -333,6 +343,22 @@ export function AiDjPanel() {
                 ? "Připravuji…"
                 : "Vstup na další písničku"}
             </button>
+            {(["year", "artist"] as const).map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                disabled={busy || state.generating || awaiting}
+                onClick={() => void speakNow(kind)}
+                title={
+                  kind === "artist"
+                    ? "Interpret další písničky bude na webu schovaný jako ????, posluchači ho hádají."
+                    : "Posluchači hádají, z kterého roku je další písnička."
+                }
+                className="rounded-full border border-[var(--line-strong)] px-4 py-1.5 text-sm font-semibold text-[var(--ink)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
+              >
+                {kind === "artist" ? "Kvíz: kdo zpívá" : "Kvíz: rok"}
+              </button>
+            ))}
             <span className="text-xs text-[var(--ink-faint)]">
               dnes {state.budget.usedToday.toLocaleString("cs-CZ")} /{" "}
               {state.budget.todayAllowance.toLocaleString("cs-CZ")}

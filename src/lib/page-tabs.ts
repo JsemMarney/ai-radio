@@ -21,11 +21,12 @@ export function studioTabFromPath(pathname: string): StudioTab {
   return STUDIO_TABS.find((t) => t.slug === slug)?.tab ?? "live";
 }
 
-export type ListenerTab = "request" | "suggest";
+export type ListenerTab = "request" | "suggest" | "quiz";
 
 export const LISTENER_TABS: { tab: ListenerTab; slug: string; label: string; short: string }[] = [
   { tab: "request", slug: "", label: "Přát si písničku", short: "Přát si" },
   { tab: "suggest", slug: "suggest", label: "Navrhnout novou", short: "Navrhnout" },
+  { tab: "quiz", slug: "kviz", label: "Kvíz a otázka dne", short: "Kvíz" },
 ];
 
 /** Staré adresy záložek, které už nejsou — přesměrují se na přehrávač. */

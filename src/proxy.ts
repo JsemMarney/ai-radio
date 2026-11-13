@@ -34,6 +34,7 @@ const PROTECTED_PREFIXES = [
   "/api/radio/ticker",
   "/api/radio/listener-stats",
   "/api/radio/ai-dj",
+  "/api/radio/activities/moderation",
   "/api/radio/schedule",
   "/api/studio/messages",
   "/api/radio/test-transition",

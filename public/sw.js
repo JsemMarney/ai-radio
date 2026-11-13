@@ -1,6 +1,6 @@
 // Miss Radio — service worker pro instalaci jako aplikace (PWA).
 // Nic nekešuje kromě ikon a offline stránky: stream, API i stránky jdou vždy živě ze sítě.
-const CACHE = "miss-radio-v3";
+const CACHE = "miss-radio-v4";
 const SHELL = ["/icons/icon-192.png", "/icons/icon-512.png", "/brand/logo.svg"];
 
 self.addEventListener("install", (event) => {
@@ -33,4 +33,42 @@ self.addEventListener("fetch", (event) => {
   if (SHELL.includes(url.pathname)) {
     event.respondWith(caches.match(req).then((hit) => hit || fetch(req)));
   }
+});
+
+// Upozornění „Kvíz právě začal“: push je bez obsahu, text se vezme z aktuálního stavu rádia.
+self.addEventListener("push", (event) => {
+  event.waitUntil(
+    (async () => {
+      let body = "Tipni si do konce písničky!";
+      try {
+        const res = await fetch("/api/radio/status", { cache: "no-store" });
+        const q = (await res.json()).quiz;
+        if (q && q.kind === "artist") body = `Kdo zpívá písničku ${q.title}? Tipni si do konce písničky!`;
+        else if (q) body = `Z kterého roku je ${q.artist}, ${q.title}? Tipni si do konce písničky!`;
+      } catch {
+        // offline — obecný text
+      }
+      await self.registration.showNotification("Hudební kvíz právě začal!", {
+        body,
+        icon: "/icons/icon-192.png",
+        badge: "/icons/icon-192.png",
+        tag: "miss-radio-quiz",
+        data: { url: "/player" },
+      });
+    })(),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || "/player";
+  event.waitUntil(
+    (async () => {
+      const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const w of wins) {
+        if (new URL(w.url).pathname.startsWith("/player") && "focus" in w) return w.focus();
+      }
+      return self.clients.openWindow(url);
+    })(),
+  );
 });

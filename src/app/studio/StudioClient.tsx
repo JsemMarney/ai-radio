@@ -27,6 +27,7 @@ import { BreakPanel } from "@/components/studio/BreakPanel";
 import { MicPanel } from "@/components/studio/MicPanel";
 import { RequestModeration } from "@/components/studio/RequestModeration";
 import { AiDjPanel } from "@/components/studio/AiDjPanel";
+import { ActivityModeration } from "@/components/studio/ActivityModeration";
 import { AiHostsPanel } from "@/components/studio/AiHostsPanel";
 import { ListenerChart } from "@/components/studio/ListenerChart";
 import { MessagesPanel } from "@/components/studio/MessagesPanel";
@@ -786,6 +787,9 @@ export function StudioClient({
                 </Card>
                 <Card id="studio-messages" className="order-3 lg:order-none">
                   <MessagesPanel onUnread={setUnreadMessages} />
+                </Card>
+                <Card className="order-7 lg:order-none">
+                  <ActivityModeration />
                 </Card>
                 <Card className="order-6 lg:order-none">
                   <SuggestionsPanel />

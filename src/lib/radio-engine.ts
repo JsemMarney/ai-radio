@@ -31,6 +31,8 @@ import {
   type AiDjFocus,
   type AiDjState,
   type DjContext,
+  type QuizKind,
+  type QuizResult,
 } from "@/lib/ai-dj";
 import { stationClock } from "@/lib/station-time";
 import { sendAlert } from "@/lib/alerts";
@@ -92,6 +94,15 @@ import {
 } from "@/lib/radio-state";
 import { ensureBroadcastFile } from "@/lib/remaster";
 import { censor, cleanInput, containsLink } from "@/lib/profanity";
+import { artistGuessMatches } from "@/lib/quiz-match";
+import {
+  Activities,
+  airSafe,
+  type ActivityModeration,
+  type BoardRow,
+  type PublicQuestion,
+} from "@/lib/activities";
+import { WebPush } from "@/lib/web-push";
 import {
   areSongRequestsEnabled,
   getMaxRequestQueue,
@@ -122,6 +133,64 @@ import type {
 } from "@/lib/types";
 
 const execFileAsync = promisify(execFile);
+
+/** Kvíz pro posluchače na webu (otevře se, když ho moderátor vyhlásí). */
+export type PublicQuiz = {
+  id: string;
+  /** year = hádá se rok, artist = hádá se interpret (do odhalení je všude „????“). */
+  kind: QuizKind;
+  /** open = sbírají se tipy, closed = uzavřeno (odpověď za chvíli), revealed = odpověď zazněla. */
+  phase: "open" | "closed" | "revealed";
+  artist: string;
+  title: string;
+  answers: number;
+  result: {
+    /** Správná odpověď (rok, nebo interpret). */
+    answer: string;
+    winners: string[];
+    right: number;
+    total: number;
+    closest: { name: string; year: number } | null;
+  } | null;
+};
+
+type QuizRound = {
+  id: string;
+  kind: QuizKind;
+  artist: string;
+  title: string;
+  year: string;
+  forUuid: string;
+  phase: "pending" | "open" | "closed" | "revealed";
+  /** Posluchači otázku slyší (status je zpožděný stejně jako stream). */
+  visible: boolean;
+  revealUuid?: string;
+  /** Body do týdenního žebříčku už rozdané. */
+  awarded?: boolean;
+  answers: Map<
+    string,
+    {
+      name: string;
+      flagged: boolean;
+      /** Skryto ve studiu — jméno nezazní a nedostane bod. */
+      hidden?: boolean;
+      year: number | null;
+      guess: string;
+      at: number;
+      net: string;
+    }
+  >;
+  result?: QuizResult;
+};
+
+const QUIZ_MAX_ANSWERS = 5000;
+/** Schovaný interpret (kvíz na interpreta) — všude místo jména. */
+const QUIZ_HIDDEN = "????";
+
+/** Víc zařízení na jedné síti (rodina na Wi-Fi) smí tipovat, ale ne neomezeně. */
+const QUIZ_PER_NETWORK = 8;
+/** Kvíz nejvýš jednou za tolik minut. */
+const QUIZ_GAP_MIN = 30;
 
 export type RadioStatus = {
   nowPlaying: RadioNowPlaying | null;
@@ -160,6 +229,8 @@ export type RadioStatus = {
   aiHost: string | null;
   /** Vlastní texty do běžícího pruhu. */
   tickerMessages: string[];
+  /** Kvíz na webu (null = žádný neběží). */
+  quiz: PublicQuiz | null;
   bed: string;
   bedLevelDb: number;
 };
@@ -333,10 +404,18 @@ export class RadioEngine {
   private djRound = 0;
   private djClip: { id: string; forUuid: string; outroSec?: number } | null =
     null;
+  /** Kvíz: otázka zazní na začátku písničky, tipy z webu během ní, odpověď hned po ní. */
+  private quiz: QuizRound | null = null;
+  private lastQuizAt = 0;
+  /** Týdenní žebříček kvízu a otázka dne. */
+  private activities = new Activities();
+  /** Upozornění „kvíz právě začal“ (Web Push do nainstalované aplikace / prohlížeče). */
+  readonly push = new WebPush();
   /** Hodina, ve které už zazněly zprávy v celou („2026-11-06 20“). */
   private djHourlyKey: string | null = null;
   /** Od kdy čeká předávka směny, než bude moct AI mluvit. */
   private shiftPendingSince: number | null = null;
+  private handoverRetries = 0;
   private djUsedNotes = new Set<string>();
   private djClipLabel: string | null = null;
   private schedule: ScheduleEntry[] = [];
@@ -473,7 +552,34 @@ export class RadioEngine {
     return Math.max(1, this.midsongCountdown);
   }
 
+  /** Kvíz na interpreta běží → skladba, jejíž interpret je schovaný. */
+  private hiddenArtistUuid(): string | null {
+    const q = this.quiz;
+    return q && q.kind === "artist" && q.phase !== "revealed" ? q.forUuid : null;
+  }
+
+  private masked<T extends { uuid: string; artist: string; thumbnail?: string | null; album?: string | null }>(
+    t: T,
+  ): T {
+    const hide = this.hiddenArtistUuid();
+    // Obal často nese jméno interpreta → taky pryč (přehrávač ukáže logo).
+    return hide && t.uuid === hide ? { ...t, artist: QUIZ_HIDDEN, thumbnail: null, album: null } : t;
+  }
+
   getStatus(): RadioStatus {
+    const st = this.rawStatus();
+    if (!this.hiddenArtistUuid()) return st;
+    return {
+      ...st,
+      nowPlaying: st.nowPlaying && this.masked(st.nowPlaying),
+      recentlyPlayed: st.recentlyPlayed.map((t) => this.masked(t)),
+      upcoming: st.upcoming.map((t) => this.masked(t)),
+      schedule: st.schedule.map((t) => this.masked(t)),
+      nextUp: st.nextUp && this.masked(st.nextUp),
+    };
+  }
+
+  private rawStatus(): RadioStatus {
     return {
       nowPlaying: this.nowPlaying,
       trackStartedAt: this.trackStartedAt,
@@ -504,6 +610,7 @@ export class RadioEngine {
       moderatorOnAir: this.isModeratorOnAir(),
       aiHost: this.currentAiHost(),
       tickerMessages: this.tickerMessages,
+      quiz: this.publicQuiz(),
       bed: this.bedChoice,
       bedLevelDb: this.bedLevelDb,
       formats: {
@@ -555,6 +662,7 @@ export class RadioEngine {
       String(this.pendingRequests.length),
       this.breakState,
       this.currentAiHost() ?? "",
+      this.quiz?.visible ? this.quiz.phase : "",
     ].join("|");
     if (!force && key === this.lastStatusKey) return;
     this.lastStatusKey = key;
@@ -585,7 +693,7 @@ export class RadioEngine {
 
   getIcyTitle(): string {
     if (!this.nowPlaying) return "";
-    return `${this.nowPlaying.artist} - ${this.nowPlaying.title}`;
+    return `${this.masked(this.nowPlaying).artist} - ${this.nowPlaying.title}`;
   }
 
   // ───────────────────────── posluchači ─────────────────────────
@@ -744,6 +852,7 @@ export class RadioEngine {
     await this.listenerStats.load();
     this.aiDj.listenedShare = (hour) => this.listenerStats.listenedShare(hour);
     await this.aiDj.load();
+    await this.activities.load();
     await loadGenres();
     // Žánry: první dávka po minutě, pak každých 10 minut, dokud knihovna nemá všechno.
     setTimeout(() => void this.classifyGenresTick(), 60_000);
@@ -1893,6 +2002,7 @@ export class RadioEngine {
     const label = this.djClipLabel;
     const clip = this.djClip;
     this.djClip = null;
+    this.advanceQuiz(item, !!clip && clip.forUuid === item.uuid && !voiceQueued);
     // Vstup připravený pro tuhle skladbu → přes její začátek (po přechodu).
     if (clip && clip.forUuid === item.uuid && !voiceQueued) {
       setTimeout(() => {
@@ -1931,6 +2041,7 @@ export class RadioEngine {
       nearHour &&
       hourOf.hour % everyH === 0 &&
       this.djHourlyKey !== hourKey &&
+      this.quiz?.phase !== "open" &&
       !this.aiDj.shiftChangeWithin(airAt, HANDOVER_QUIET_MIN) &&
       this.aiDj.isConfigured() &&
       this.canDjSpeak() &&
@@ -1951,6 +2062,7 @@ export class RadioEngine {
       Number.isFinite(sumHour) &&
       clk.hour === sumHour &&
       this.aiDj.summarySaidOn !== clk.date &&
+      this.quiz?.phase !== "open" &&
       this.aiDj.isConfigured() &&
       this.canDjSpeak() &&
       !this.aiDj.isBusy &&
@@ -1963,6 +2075,25 @@ export class RadioEngine {
       void this.prepareDjFor(item, "daily-summary", {
         summary: this.dailySummary(),
       });
+      return;
+    }
+    // Neděle večer: vítězové kvízového týdne (jednou za týden, AI_DJ_QUIZ_WINNERS_HOUR, výchozí 19 h).
+    const winners = s.enabled
+      ? this.activities.winnersDue(Number(process.env.AI_DJ_QUIZ_WINNERS_HOUR ?? 19) || 19)
+      : null;
+    if (
+      winners &&
+      !this.quiz &&
+      !this.aiDj.shiftChangeWithin(airAt, HANDOVER_QUIET_MIN) &&
+      this.aiDj.isConfigured() &&
+      this.canDjSpeak() &&
+      !this.aiDj.isBusy &&
+      this.aiDj.budget().canSpeak &&
+      this.hasListeners() &&
+      this.aiDj.hostsAt(airAt, this.djFallbackName()).length
+    ) {
+      this.resetDjGap();
+      void this.prepareDjFor(item, "quiz-winners", { quizBoard: winners });
       return;
     }
     if (!s.enabled || !this.aiDj.isConfigured()) return;
@@ -2024,15 +2155,12 @@ export class RadioEngine {
     };
     // Nikdo neposlouchá → směna se přepne potichu (nikdo pak netvrdí, že právě nastoupil).
     if (!this.hasListeners()) return silently();
-    // Nejde mluvit teď → zkusí to u další skladby; po 20 minutách už jen potichu přepne
-    // (předávka o hodinu později by zněla divně).
-    if (
-      !this.canDjSpeak() ||
-      this.aiDj.isBusy ||
-      !this.aiDj.budget().canSpeak
-    ) {
+    // Předávka zazní vždycky, když někdo poslouchá — nezávisle na rozestupu vstupů
+    // i na denním přídělu kreditů. Čeká jen na živý mikrofon / pauzu na slovo
+    // (nebo vyčerpaný měsíc) — to zkusí u další skladby, po 45 minutách přepne potichu.
+    if (!this.canDjSpeak() || !this.aiDj.budget().canSpeakEssential) {
       this.shiftPendingSince ??= Date.now();
-      if (Date.now() - this.shiftPendingSince > 20 * 60_000) return silently();
+      if (Date.now() - this.shiftPendingSince > 45 * 60_000) return silently();
       return false;
     }
     this.shiftPendingSince = null;
@@ -2072,15 +2200,32 @@ export class RadioEngine {
         `Předávka směny: ${leaving.join(", ") || "—"} → ${arriving.join(", ") || "jen hudba"}${staying.length ? ` (zůstává ${staying.join(", ")})` : ""} · mluví ${speakers.map((h) => h.name).join(" & ")}`,
       ),
     );
-    void this.prepareDjFor(item, "handover", {
-      hosts: speakers,
-      handover: {
-        leaving,
-        arriving,
-        staying,
-        ...(early ? { at: at.toISOString() } : {}),
-      },
-    });
+    void (async () => {
+      // Píše se jiný vstup → počkat, až doběhne (předávka ho pak nahradí), ne odkládat o skladbu.
+      for (let i = 0; i < 60 && this.aiDj.isBusy && this.main?.uuid === item.uuid; i++)
+        await new Promise((r) => setTimeout(r, 2000));
+      const ok =
+        !this.aiDj.isBusy &&
+        this.main?.uuid === item.uuid &&
+        (await this.prepareDjFor(item, "handover", {
+          hosts: speakers,
+          handover: {
+            leaving,
+            arriving,
+            staying,
+            ...(early ? { at: at.toISOString() } : {}),
+          },
+        }));
+      if (ok) {
+        this.handoverRetries = 0;
+        return;
+      }
+      // Nepovedlo se (chyba modelu, skladba mezitím skončila) → zkusit u další skladby, nejvýš 2×.
+      if (this.handoverRetries++ < 2) {
+        radioLog("🤖", c.yellow("Předávka se nepovedla — zkusím ji u další skladby"));
+        this.aiDj.setShiftNames(prev, null);
+      } else this.handoverRetries = 0;
+    })();
     return true;
   }
 
@@ -2131,24 +2276,33 @@ export class RadioEngine {
   private async prepareDjFor(
     current: PreparedTrack,
     focus?: AiDjFocus,
-    extra?: Partial<Pick<DjContext, "hosts" | "handover" | "summary">>,
-  ): Promise<void> {
+    extra?: Partial<
+      Pick<DjContext, "hosts" | "handover" | "summary" | "quizResult" | "quizKind" | "quizBoard">
+    >,
+  ): Promise<boolean> {
     for (let i = 0; i < 30 && !this.next && this.started; i++) {
       await new Promise((r) => setTimeout(r, 2000));
     }
     const next = this.next;
-    if (!next || !this.ffmpegPath || !this.hasListeners()) return;
+    if (!next || !this.ffmpegPath || !this.hasListeners()) return false;
+    let round: QuizRound | null = null;
     try {
       const ctx = {
         ...(await this.buildDjContext(current.meta, next, focus)),
         ...extra,
       };
+      if (ctx.focus === "quiz") {
+        round = this.beginQuiz(next, extra?.quizKind);
+        if (round) ctx.quizKind = round.kind;
+        else ctx.focus = "music";
+      }
       const seg = await this.aiDj.createSegment(ctx, this.ffmpegPath);
       // Vstup patří jen k téhle skladbě — po skipu nebo změně fronty se nepustí.
       // Polovina krátkých vstupů začne už přes konec dohrávající skladby (zprávy ne — ty patří k celé).
       const outro =
         focus !== "hourly-news" &&
         focus !== "handover" &&
+        focus !== "quiz-answer" &&
         seg.durationSec > 0 &&
         seg.durationSec <= 14 &&
         Math.random() < 0.5
@@ -2156,13 +2310,17 @@ export class RadioEngine {
           : undefined;
       this.djClip = { id: seg.id, forUuid: next.uuid, outroSec: outro };
       this.djClipLabel = seg.hosts.join(" & ") || null;
+      this.afterSegment(ctx.focus);
       radioLog(
         "🤖",
         c.cyan(`AI vstup připraven (${ctx.focus})`),
         seg.text.slice(0, 90),
       );
+      return true;
     } catch (err) {
       console.warn("[ai-dj]", err instanceof Error ? err.message : err);
+      this.dropQuiz(round);
+      return false;
     }
   }
 
@@ -2189,7 +2347,12 @@ export class RadioEngine {
         news: s.news,
         weather: s.weather,
         hasNotes: notes.length > 0,
-        quiz: !!next?.meta.year,
+        quiz:
+          !!next &&
+          !this.quiz &&
+          Date.now() - this.lastQuizAt > QUIZ_GAP_MIN * 60_000,
+        question: this.activities.questionDue(),
+        questionRead: this.activities.readDue(),
       });
     if (focus === "listeners") notes.forEach((n) => this.djUsedNotes.add(n.id));
     const req =
@@ -2240,6 +2403,7 @@ export class RadioEngine {
           : 0,
       },
       voiceReply: voiceReply ?? null,
+      ...this.activityContext(focus),
       upcoming: this.djUpcoming(next?.uuid ?? null),
       // Vstup k další skladbě zazní až na jejím začátku; odpověď na hlasovku hned.
       airAt: (next && !voiceReply
@@ -2247,6 +2411,16 @@ export class RadioEngine {
         : new Date()
       ).toISOString(),
     };
+  }
+
+  /** Podklady k otázce dne pro vstup (otázka / vybrané odpovědi). */
+  private activityContext(focus: AiDjFocus): Partial<DjContext> {
+    if (focus === "question") return { dayQuestion: { text: this.activities.pickQuestion() } };
+    if (focus === "question-read") {
+      const r = this.activities.answersToRead();
+      return r ? { dayQuestion: { text: r.question, answers: r.answers } } : { focus: "music" };
+    }
+    return {};
   }
 
   getAiDjState(): AiDjState {
@@ -2268,11 +2442,315 @@ export class RadioEngine {
     return this.aiDj.state();
   }
 
+  // ───────────────────────── Kvíz ─────────────────────────
+
+  /** Začala skladba → posune kvíz: otevřít (kvízová písnička), odhalit (další), uklidit. */
+  private advanceQuiz(item: PreparedTrack, clipAired: boolean): void {
+    const q = this.quiz;
+    if (!q) return;
+    if (q.phase === "pending") {
+      // Otázka nezazněla (skip, mikrofon, změna fronty) → kvíz se neotevře.
+      if (q.forUuid !== item.uuid || !clipAired) {
+        this.quiz = null;
+        return;
+      }
+      q.phase = "open";
+      this.announce(() => {
+        if (this.quiz !== q) return;
+        q.visible = true;
+        this.emitStatus(true);
+        // Odběratelům upozornění: „Kvíz právě začal!“ (text si stáhne service worker ze stavu).
+        void this.push
+          .notifyAll(300)
+          .then((r) => {
+            if (r.sent || r.removed)
+              radioLog("🔔", c.cyan(`Kvíz: upozornění ${r.sent}× odesláno${r.removed ? `, ${r.removed} zaniklých odběrů smazáno` : ""}`));
+          })
+          .catch((err: unknown) => console.warn("[push]", err));
+      });
+      // Tipy do ~75 s před koncem písničky — pak se napíše a namluví odpověď.
+      const closeSec = Math.max(30, (item.durationSec || 200) - 75);
+      setTimeout(() => void this.closeQuiz(q, item), closeSec * 1000);
+      return;
+    }
+    if (q.phase === "open" || q.phase === "closed") {
+      // Kvízová písnička dohrála → odpověď zazní na začátku téhle skladby.
+      if (q.phase === "open") {
+        q.phase = "closed";
+        q.result = this.finishQuiz(q);
+      }
+      q.revealUuid = item.uuid;
+      this.announce(() => {
+        if (this.quiz !== q) return;
+        q.phase = "revealed";
+        this.emitStatus(true);
+      });
+      return;
+    }
+    if (q.phase === "revealed" && q.revealUuid !== item.uuid) {
+      this.announce(() => {
+        if (this.quiz !== q) return;
+        this.quiz = null;
+        this.emitStatus(true);
+      });
+    }
+  }
+
+  private async closeQuiz(q: QuizRound, item: PreparedTrack): Promise<void> {
+    if (this.quiz !== q || q.phase !== "open" || this.main?.uuid !== item.uuid) return;
+    q.phase = "closed";
+    const result = this.finishQuiz(q);
+    q.result = result;
+    this.emitStatus(true);
+    radioLog(
+      "🤖",
+      c.cyan(`Kvíz uzavřen — ${result.total} tipů, ${result.right} správně`),
+    );
+    // Na začátek další skladby už je připravený jiný vstup (předávka…) → odpověď jen na webu.
+    if (this.djClip && this.djClip.forUuid === this.next?.uuid) return;
+    if (!this.canDjSpeak() || !this.hasListeners() || !this.aiDj.budget().canSpeak) return;
+    if (!this.aiDj.hostsAt(new Date(), this.djFallbackName()).length) return;
+    for (let i = 0; i < 10 && this.aiDj.isBusy; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    if (this.aiDj.isBusy || this.quiz !== q || this.main?.uuid !== item.uuid) return;
+    this.resetDjGap();
+    await this.prepareDjFor(item, "quiz-answer", { quizResult: result });
+  }
+
+  /**
+   * Kvíz pro další skladbu — založí se hned (interpret se schová už v „Hraje další“),
+   * otevře se, až otázka zazní. Null = nejde (už jeden běží, chybí rok).
+   */
+  private beginQuiz(next: PreparedTrack, kind?: QuizKind): QuizRound | null {
+    if (this.quiz) return null;
+    const k: QuizKind = kind ?? (next.meta.year && Math.random() < 0.5 ? "year" : "artist");
+    if (k === "year" && !/\d{4}/.test(next.meta.year ?? "")) return null;
+    const q: QuizRound = {
+      id: randomUUID(),
+      kind: k,
+      artist: next.meta.artist,
+      title: next.meta.title,
+      year: next.meta.year ?? "",
+      forUuid: next.uuid,
+      phase: "pending",
+      visible: false,
+      answers: new Map(),
+    };
+    this.quiz = q;
+    this.lastQuizAt = Date.now();
+    this.emitStatus(true);
+    return q;
+  }
+
+  /** Otázka se nepovedla / nezazní → kvíz pryč (a interpret zase vidět). */
+  private dropQuiz(q: QuizRound | null): void {
+    if (q && this.quiz === q) {
+      this.quiz = null;
+      this.emitStatus(true);
+    }
+  }
+
+  /** Vyhodnotí kvíz a jednou rozdá body do týdenního žebříčku (jen tipům se jménem). */
+  private finishQuiz(q: QuizRound): QuizResult {
+    const result = this.quizResult(q);
+    if (!q.awarded) {
+      q.awarded = true;
+      const right = Number(/\d{4}/.exec(q.year)?.[0]);
+      const winners = [...q.answers.entries()]
+        .filter(([, a]) =>
+          a.name && !a.flagged && !a.hidden &&
+          (q.kind === "artist" ? artistGuessMatches(a.guess, q.artist) : a.year === right),
+        )
+        .map(([voter, a]) => ({ voter, name: a.name }));
+      this.activities.award(winners);
+    }
+    return result;
+  }
+
+  getActivities(): { board: { week: string; top: BoardRow[] }; question: PublicQuestion | null } {
+    return { board: this.activities.board(), question: this.activities.publicQuestion() };
+  }
+
+  /** Studio: odpovědi na otázku dne, tipy probíhajícího kvízu a žebříček. */
+  getActivityModeration(): ActivityModeration & {
+    quiz: {
+      kind: QuizKind;
+      artist: string;
+      title: string;
+      phase: QuizRound["phase"];
+      answers: { id: string; name: string; guess: string; correct: boolean; flagged: boolean; hidden: boolean }[];
+    } | null;
+  } {
+    const q = this.quiz;
+    const right = q ? Number(/\d{4}/.exec(q.year)?.[0]) : 0;
+    return {
+      ...this.activities.moderation(),
+      quiz: q
+        ? {
+            kind: q.kind,
+            artist: q.artist,
+            title: q.title,
+            phase: q.phase,
+            answers: [...q.answers.entries()]
+              .sort(([, x], [, y]) => y.at - x.at)
+              .slice(0, 100)
+              .map(([id, a]) => ({
+                id,
+                name: a.name,
+                guess: a.guess,
+                correct: q.kind === "artist" ? artistGuessMatches(a.guess, q.artist) : a.year === right,
+                flagged: a.flagged,
+                hidden: !!a.hidden,
+              })),
+          }
+        : null,
+    };
+  }
+
+  /** Studio: skrýt odpověď / tip v kvízu, vyřadit hráče ze žebříčku. */
+  moderateActivity(input: { target?: unknown; id?: unknown; hidden?: unknown }): { ok: boolean; error?: string } {
+    const id = typeof input.id === "string" ? input.id : "";
+    const hidden = input.hidden !== false;
+    let ok = false;
+    if (input.target === "answer") ok = this.activities.hideAnswer(id, hidden);
+    else if (input.target === "player") ok = this.activities.removePlayer(id);
+    else if (input.target === "quiz") {
+      const a = this.quiz?.answers.get(id);
+      // Po vyhodnocení už body i jména platí — skrývat jde jen do uzavření.
+      if (a && this.quiz && !this.quiz.awarded) {
+        a.hidden = hidden;
+        ok = true;
+      } else if (a) return { ok: false, error: "Kvíz už je vyhodnocený." };
+    }
+    return ok ? { ok: true } : { ok: false, error: "Položka nenalezena." };
+  }
+
+  answerQuestion(input: { name?: unknown; text?: unknown; voter?: unknown; net?: unknown }) {
+    return this.activities.answer(input);
+  }
+
+  /** Povedený vstup → zapsat, co zaznělo (otázka dne položená / přečtená, vítězové vyhlášení). */
+  private afterSegment(focus: AiDjFocus): void {
+    if (focus === "question") this.activities.markAsked();
+    else if (focus === "question-read") this.activities.markRead();
+    else if (focus === "quiz-winners") this.activities.markWinnersAnnounced();
+  }
+
+  private quizResult(q: QuizRound): QuizResult {
+    const right = Number(/\d{4}/.exec(q.year)?.[0]);
+    const all = [...q.answers.values()].sort((x, y) => x.at - y.at);
+    const correct = all.filter((a) =>
+      q.kind === "artist" ? artistGuessMatches(a.guess, q.artist) : a.year === right,
+    );
+    const seen = new Set<string>();
+    const winners: string[] = [];
+    for (const a of correct) {
+      if (a.flagged || a.hidden || !a.name) continue;
+      const key = a.name.toLocaleLowerCase("cs");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      winners.push(a.name);
+    }
+    let closest: QuizResult["closest"] = null;
+    if (q.kind === "year" && !correct.length && all.length) {
+      const best = all.reduce((b, a) =>
+        Math.abs((a.year ?? 0) - right) < Math.abs((b.year ?? 0) - right) ? a : b,
+      );
+      closest = { name: best.flagged || best.hidden ? "" : best.name, year: best.year ?? 0 };
+    }
+    return {
+      kind: q.kind,
+      artist: q.artist,
+      title: q.title,
+      year: right ? String(right) : q.year,
+      total: all.length,
+      right: correct.length,
+      winners,
+      closest,
+    };
+  }
+
+  private publicQuiz(): PublicQuiz | null {
+    const q = this.quiz;
+    if (!q || !q.visible || q.phase === "pending") return null;
+    const r = q.phase === "revealed" ? q.result : undefined;
+    return {
+      id: q.id,
+      kind: q.kind,
+      phase: q.phase,
+      artist: q.kind === "artist" && q.phase !== "revealed" ? QUIZ_HIDDEN : q.artist,
+      title: q.title,
+      answers: q.answers.size,
+      result: r
+        ? {
+            answer: r.kind === "artist" ? r.artist : r.year,
+            winners: r.winners.slice(0, 10),
+            right: r.right,
+            total: r.total,
+            closest: r.closest,
+          }
+        : null,
+    };
+  }
+
+  /** Tip posluchače z webu — jeden na posluchače (voter = otisk IP z webu). */
+  submitQuizAnswer(input: {
+    id?: unknown;
+    name?: unknown;
+    year?: unknown;
+    answer?: unknown;
+    voter?: unknown;
+    net?: unknown;
+  }): { ok: boolean; error?: string } {
+    const q = this.quiz;
+    if (!q || !q.visible || q.id !== input.id)
+      return { ok: false, error: "Tenhle kvíz už neběží." };
+    if (q.phase !== "open")
+      return { ok: false, error: "Tipy jsou uzavřené, odpověď uslyšíš za chvíli." };
+    const voter = typeof input.voter === "string" ? input.voter.slice(0, 80) : "";
+    if (!voter) return { ok: false, error: "Tip se nepodařilo odeslat." };
+    if (q.answers.has(voter))
+      return { ok: false, error: "Tip už máš poslaný, jen jeden na posluchače." };
+    if (q.answers.size >= QUIZ_MAX_ANSWERS) return { ok: false, error: "Kvíz je plný." };
+    const net = typeof input.net === "string" ? input.net.slice(0, 80) : "";
+    let fromNet = 0;
+    for (const a of q.answers.values()) if (a.net === net) fromNet++;
+    if (fromNet >= QUIZ_PER_NETWORK)
+      return { ok: false, error: "Z této sítě už přišlo tipů dost." };
+    let year: number | null = null;
+    let guess = "";
+    if (q.kind === "artist") {
+      guess = cleanInput(input.answer, 60).trim();
+      if (guess.length < 2) return { ok: false, error: "Napiš, kdo podle tebe zpívá." };
+    } else {
+      year = Number(input.year);
+      const maxYear = Number(stationClock().date.slice(0, 4));
+      if (!Number.isInteger(year) || year < 1900 || year > maxYear)
+        return { ok: false, error: `Napiš rok mezi 1900 a ${maxYear}.` };
+      guess = String(year);
+    }
+    const raw = cleanInput(input.name, 24);
+    if (containsLink(raw) || containsLink(guess)) return { ok: false, error: "Odkaz místo jména nejde." };
+    const name = censor(airSafe(raw));
+    q.answers.set(voter, {
+      name: name.text.trim(),
+      flagged: name.flagged,
+      year,
+      guess,
+      at: Date.now(),
+      net,
+    });
+    return { ok: true };
+  }
+
   /**
    * Studio: vstup na vyžádání. Píše se a namlouvá hned na pozadí, ale zazní až
    * mezi písničkami — na začátku té další (ne přes rozehranou skladbu).
    */
-  async aiDjNow(): Promise<{ ok: boolean; error?: string; pending?: boolean }> {
+  async aiDjNow(
+    opts: { quiz?: QuizKind } = {},
+  ): Promise<{ ok: boolean; error?: string; pending?: boolean }> {
     const ffmpegPath = this.ffmpegPath;
     if (!ffmpegPath) return { ok: false, error: "Chybí ffmpeg." };
     if (!this.canDjSpeak())
@@ -2289,25 +2767,43 @@ export class RadioEngine {
     }
     if (this.djClip && this.djClip.forUuid === this.next?.uuid)
       return { ok: false, error: "Vstup už je připravený na další písničku." };
+    if (opts.quiz && this.quiz) return { ok: false, error: "Kvíz už běží." };
+    if (opts.quiz === "year" && this.next && !/\d{4}/.test(this.next.meta.year ?? ""))
+      return {
+        ok: false,
+        error: "Další písnička nemá v knihovně rok — dej kvíz na interpreta.",
+      };
     // Vstup se připraví hned, ale zazní až mezi písničkami — na začátku té další.
     this.resetDjGap();
     void (async () => {
+      let round: QuizRound | null = null;
       try {
         for (let i = 0; i < 30 && !this.next && this.started; i++)
           await new Promise((r) => setTimeout(r, 2000));
         const next = this.next;
         if (!next) return;
-        const ctx = await this.buildDjContext(this.nowPlaying, next);
+        const ctx = await this.buildDjContext(
+          this.nowPlaying,
+          next,
+          opts.quiz ? "quiz" : undefined,
+        );
+        if (opts.quiz) {
+          round = this.beginQuiz(next, opts.quiz);
+          if (!round) return;
+          ctx.quizKind = round.kind;
+        }
         const seg = await this.aiDj.createSegment(ctx, ffmpegPath, true);
         if (this.next?.uuid !== next.uuid) {
           radioLog(
             "🤖",
             c.dim("AI vstup hotový, ale písnička mezitím začala — zahozen"),
           );
+          this.dropQuiz(round);
           return;
         }
         this.djClip = { id: seg.id, forUuid: next.uuid };
         this.djClipLabel = seg.hosts.join(" & ") || null;
+        this.afterSegment(ctx.focus);
         radioLog(
           "🤖",
           c.cyan("AI vstup ze studia připraven na další písničku"),
@@ -2315,6 +2811,7 @@ export class RadioEngine {
         );
       } catch (err) {
         console.warn("[ai-dj]", err instanceof Error ? err.message : err);
+        this.dropQuiz(round);
       }
     })();
     return { ok: true, pending: true };
@@ -3400,7 +3897,11 @@ export class RadioEngine {
     const wanted = new Set(ids.slice(0, 20));
     return this.requestLog
       .filter((r) => wanted.has(r.id))
-      .map((r) => this.requestView(r));
+      .map((r) =>
+        r.uuid === this.hiddenArtistUuid()
+          ? { ...this.requestView(r), artist: QUIZ_HIDDEN }
+          : this.requestView(r),
+      );
   }
 
   /** Pro studio: čekající přání (nejstarší první) + pár posledních rozhodnutých. */
