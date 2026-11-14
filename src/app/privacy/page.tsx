@@ -63,7 +63,7 @@ export default function PrivacyPage() {
       <h2>4. Data stored in your browser</h2>
       <p>
         The player saves a few settings only in your own browser (local storage), never on our server: volume,
-        stream quality, the visualizer switch, the name you last used and a list of the
+        stream quality, when you closed the “add to home screen” offer, the name you last used and a list of the
         requests you sent (so you can see their status). You can delete them at any time by clearing this
         site’s data in your browser. The installed app (PWA) also stores its icons so it can open offline.
       </p>

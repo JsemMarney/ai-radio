@@ -15,11 +15,11 @@ import {
   StationHeader,
   VolumeControl,
 } from "@/components/player/BroadcastUi";
-import { AudioVisualizer } from "@/components/player/AudioVisualizer";
 import { SongRequestPanel } from "@/components/player/SongRequestPanel";
 import { SuggestPanel } from "@/components/player/SuggestPanel";
 import { QuizPanel } from "@/components/player/QuizPanel";
 import { ActivitiesPanel } from "@/components/player/ActivitiesPanel";
+import { InstallPrompt } from "@/components/player/InstallPrompt";
 import { useRadio } from "@/components/RadioProvider";
 import { useCoverTint } from "@/components/player/useCoverTint";
 import type { StationConfig } from "@/lib/types";
@@ -102,8 +102,6 @@ export function PlayerClient({
     aiHost,
     tickerMessages,
     segment,
-    visualizer,
-    setVisualizer,
   } = useRadio();
   // Živý moderátor má přednost; jinak AI moderátor se směnou; jinak AutoDJ.
   const moderator = micLive || moderatorOnAir ? moderatorName : aiHost;
@@ -198,7 +196,7 @@ export function PlayerClient({
       className="ambient flex min-h-screen flex-col pt-[env(safe-area-inset-top)]"
       style={{ "--tint": tint } as CSSProperties}
     >
-      <AudioVisualizer />
+      <InstallPrompt name={station.name} />
       <Ticker items={tickerItems} />
       <header className="sticky top-0 z-20 border-b border-[var(--line)] bg-[var(--bg-deep)]">
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-3 px-3 sm:h-16 sm:px-6">
@@ -300,20 +298,13 @@ export function PlayerClient({
             </Link>
             <button
               type="button"
-              onClick={() => setVisualizer(!visualizer)}
-              aria-pressed={visualizer}
-              className="transition-colors hover:text-[var(--ink)]"
-            >
-              Vizualizér: {visualizer ? "zap" : "vyp"}
-            </button>
-            <button
-              type="button"
               onClick={() => void copyShareUrl()}
               className="transition-colors hover:text-[var(--ink)]"
             >
               {copied ? "Odkaz zkopírován" : "Sdílet odkaz"}
             </button>
-            <Link href="/studio" className="transition-colors hover:text-[var(--ink)]">
+            {/* V aplikaci na ploše posluchač studio nepotřebuje. */}
+            <Link href="/studio" className="transition-colors hover:text-[var(--ink)] [@media(display-mode:standalone)]:hidden">
               Studio
             </Link>
           </div>

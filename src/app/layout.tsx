@@ -32,7 +32,7 @@ export const metadata: Metadata = {
     ],
     shortcut: "/icons/icon-32.png",
     // ?v= obejde ikonu, kterou si Safari zapamatoval dřív (jinak dá na plochu jen písmeno).
-    apple: [{ url: "/apple-touch-icon.png?v=2", sizes: "180x180", type: "image/png" }],
+    apple: [{ url: "/apple-touch-icon.png?v=3", sizes: "180x180", type: "image/png" }],
   },
   formatDetection: { telephone: false },
 };
